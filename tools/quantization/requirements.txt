@@ -2,3 +2,4 @@ numpy>=1.24
 onnx>=1.15
 onnxruntime>=1.17
 onnxconverter-common>=1.14
+pytest>=8
