@@ -675,6 +675,121 @@ def _promote_float16_tensors(model):
             value_info.type.tensor_type.elem_type = onnx.TensorProto.FLOAT
 
 
+def validate_cmajor_operator_contracts(model):
+    """Reject valid ONNX graphs that exceed the bundled Cmajor template semantics."""
+    shapes = {}
+    element_types = {}
+
+    for value in list(model.graph.input) + list(model.graph.output) + list(model.graph.value_info):
+        if value.type.HasField("tensor_type"):
+            tensor_type = value.type.tensor_type
+            element_types[value.name] = tensor_type.elem_type
+            if tensor_type.HasField("shape"):
+                shapes[value.name] = [
+                    dim.dim_value if dim.HasField("dim_value") and dim.dim_value > 0 else None
+                    for dim in tensor_type.shape.dim
+                ]
+
+    for tensor in model.graph.initializer:
+        shapes[tensor.name] = list(tensor.dims)
+        element_types[tensor.name] = tensor.data_type
+
+    for node in model.graph.node:
+        attrs = {
+            item.name: onnx.helper.get_attribute_value(item)
+            for item in node.attribute
+        }
+
+        if node.op_type == "Transpose":
+            if element_types.get(node.input[0]) != onnx.TensorProto.FLOAT:
+                raise ValueError(
+                    f"{node.name or 'Transpose'}: bundled Cmajor Transpose uses FLOAT32 storage only"
+                )
+
+        if node.op_type == "Gemm":
+            if (
+                float(attrs.get("alpha", 1.0)) != 1.0
+                or float(attrs.get("beta", 1.0)) != 1.0
+                or int(attrs.get("transA", 0)) != 0
+                or int(attrs.get("transB", 0)) != 0
+            ):
+                raise ValueError(
+                    f"{node.name or 'Gemm'}: bundled Cmajor Gemm supports only alpha=beta=1 and transA=transB=0"
+                )
+
+        if node.op_type != "Conv":
+            continue
+
+        if len(node.input) > 2 and node.input[2]:
+            raise ValueError(
+                f"{node.name or 'Conv'}: bundled Cmajor Conv does not implement the optional bias input"
+            )
+
+        input_shape = shapes.get(node.input[0])
+        weight_shape = shapes.get(node.input[1])
+        output_shape = shapes.get(node.output[0])
+        if not input_shape or not weight_shape or not output_shape:
+            raise ValueError(
+                f"{node.name or 'Conv'}: input, weight, and output shapes must be available after ONNX shape inference"
+            )
+        if len(input_shape) != 4 or len(weight_shape) != 4 or len(output_shape) != 4:
+            raise ValueError(
+                f"{node.name or 'Conv'}: bundled Cmajor Conv requires rank-4 input, weights, and output"
+            )
+        if any(element_types.get(name) != onnx.TensorProto.FLOAT for name in (node.input[0], node.input[1], node.output[0])):
+            raise ValueError(
+                f"{node.name or 'Conv'}: bundled Cmajor Conv supports FLOAT32 input, weights, and output only"
+            )
+
+        required_dims = (
+            input_shape[1], input_shape[2], input_shape[3],
+            weight_shape[0], weight_shape[1], weight_shape[2], weight_shape[3],
+            output_shape[1], output_shape[2], output_shape[3],
+        )
+        if any(value is None for value in required_dims):
+            raise ValueError(
+                f"{node.name or 'Conv'}: channel and spatial dimensions must be static"
+            )
+        if input_shape[2] != 1 or weight_shape[2] != 1 or output_shape[2] != 1:
+            raise ValueError(
+                f"{node.name or 'Conv'}: bundled Cmajor Conv only supports height=1 (1-D convolution)"
+            )
+        if input_shape[1] != weight_shape[1] or output_shape[1] != weight_shape[0]:
+            raise ValueError(
+                f"{node.name or 'Conv'}: channel dimensions do not match the bundled Cmajor Conv contract"
+            )
+
+        kernel = list(attrs.get("kernel_shape", weight_shape[2:]))
+        if kernel != weight_shape[2:]:
+            raise ValueError(
+                f"{node.name or 'Conv'}: kernel_shape must match the initializer spatial dimensions"
+            )
+        if "kernel_shape" not in attrs:
+            node.attribute.append(onnx.helper.make_attribute("kernel_shape", kernel))
+
+        dilations = list(attrs.get("dilations", [1, 1]))
+        strides = list(attrs.get("strides", [1, 1]))
+        pads = list(attrs.get("pads", [0, 0, 0, 0]))
+        group = int(attrs.get("group", 1))
+        auto_pad = attrs.get("auto_pad", b"NOTSET")
+        if isinstance(auto_pad, bytes):
+            auto_pad = auto_pad.decode("ascii", errors="strict")
+        if len(kernel) != 2 or len(dilations) != 2 or dilations[0] != 1 or dilations[1] < 1:
+            raise ValueError(f"{node.name or 'Conv'}: unsupported kernel/dilation configuration")
+        if strides != [1, 1] or pads != [0, 0, 0, 0] or group != 1 or auto_pad not in ("NOTSET", "VALID"):
+            raise ValueError(
+                f"{node.name or 'Conv'}: bundled Cmajor Conv requires stride=1, zero padding, group=1, and auto_pad NOTSET/VALID"
+            )
+
+        expected_width = input_shape[3] - dilations[1] * (kernel[1] - 1)
+        if expected_width < 1 or output_shape[3] != expected_width:
+            raise ValueError(
+                f"{node.name or 'Conv'}: output width does not match valid, stride-1 convolution geometry"
+            )
+        if input_shape[0] is not None and output_shape[0] is not None and input_shape[0] != output_shape[0]:
+            raise ValueError(f"{node.name or 'Conv'}: batch dimension mismatch")
+
+
 def prepare_quantized_model(model):
     """Apply only explicit, supported fallback rewrites; reject ambiguous tensors."""
     if model.graph.sparse_initializer:
@@ -682,7 +797,7 @@ def prepare_quantized_model(model):
     # DequantizeLinear is admitted only as an initializer-folding pattern;
     # _dequantize_int8_initializers removes it before ordinary code generation.
     # These template operators contain static_assert(false) and cannot compile.
-    unimplemented_template_ops = {"LSTM", "Slice", "Gather", "Concat"}
+    unimplemented_template_ops = {"LSTM", "Slice", "Gather", "Concat", "GRU", "Pad"}
     allowed_ops = (set(nodeEndpointNames) - unimplemented_template_ops) | {"DequantizeLinear"}
     unsupported_nodes = [
         f"{node.name or '<unnamed>'}:{node.domain or 'ai.onnx'}::{node.op_type}"
