@@ -81,6 +81,9 @@ def run(args) -> dict:
             f"source SHA-256 mismatch: expected {args.sha256.lower()}, got {source_hash}"
         )
 
+    if args.mode == "int8" and not any(item.strip() for item in args.op_types.split(",")):
+        raise ValueError("INT8 mode requires at least one --op-types value")
+
     source_model = onnx.load(str(source), load_external_data=False)
     reject_external_data(source_model)
     onnx.checker.check_model(source_model)
