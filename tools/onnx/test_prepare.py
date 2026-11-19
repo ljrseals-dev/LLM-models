@@ -15,6 +15,8 @@ from onnx import TensorProto, helper, numpy_helper
 
 ROOT = Path(__file__).resolve().parents[2]
 PREPARE = ROOT / "tools" / "onnx" / "prepare_model.py"
+sys.path.insert(0, str(ROOT / "tools" / "onnx"))
+from prepare_model import patch_identifier  # noqa: E402
 
 
 def make_quantized_model(path: Path) -> None:
@@ -33,6 +35,10 @@ def make_quantized_model(path: Path) -> None:
 
 
 class PrepareModelTests(unittest.TestCase):
+    def test_patch_ids_are_stable_and_slug_collision_resistant(self):
+        self.assertEqual(patch_identifier("tests/fixture"), patch_identifier("tests/fixture"))
+        self.assertNotEqual(patch_identifier("publisher/a-b"), patch_identifier("publisher/a/b"))
+
     def run_prepare(self, source: Path, output: Path, digest: str):
         return subprocess.run(
             [
