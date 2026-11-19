@@ -342,7 +342,7 @@ cmd_pull() {
 }
 
 cmd_prepare() {
-  local id="\${1:-}" artifact_id="" output=""
+  local id="${1:-}" artifact_id="" output=""
   [[ -n "$id" ]] || die "Usage: $PROG prepare <id> [--artifact ARTIFACT_ID] [--output DIR]"
   shift
   while [[ $# -gt 0 ]]; do
@@ -415,7 +415,7 @@ cmd_prepare() {
   local prepared_root safe_id stage_root stage_patch final_output
   prepared_root="$REGISTRY_DIR/prepared"
   mkdir -p "$prepared_root"
-  safe_id="\${id//\//__}"
+  safe_id="${id//\//__}"
   if [[ -z "$output" ]]; then
     final_output="$prepared_root/$safe_id"
   else
