@@ -34,8 +34,8 @@ jobs:
 
       - name: Check shell syntax
         run: |
-          bash -n cli/llm-models lib/common.sh scripts/smoke-test.sh
-          shellcheck -x cli/llm-models lib/common.sh scripts/smoke-test.sh
+          bash -n cli/llm-models lib/common.sh scripts/smoke-test.sh tools/onnx/test_cli_prepare.sh
+          shellcheck -x cli/llm-models lib/common.sh scripts/smoke-test.sh tools/onnx/test_cli_prepare.sh
 
       - name: Test numeric quantized fallback transforms
         run: "$RUNNER_TEMP/venv/bin/python tools/onnx/test_fallback.py"
