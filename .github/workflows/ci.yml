@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "repair/**"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  shell-and-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install validation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq shellcheck
+          python3 -m pip install --user check-jsonschema
+
+      - name: Check shell syntax
+        run: |
+          bash -n cli/llm-models lib/common.sh scripts/smoke-test.sh
+          shellcheck cli/llm-models lib/common.sh scripts/smoke-test.sh
+
+      - name: Run isolated regression tests
+        env:
+          PATH: /home/runner/.local/bin:$PATH
+        run: bash scripts/smoke-test.sh
