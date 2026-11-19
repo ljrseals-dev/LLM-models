@@ -3,3 +3,4 @@ onnx>=1.15
 onnxruntime>=1.17
 onnxconverter-common>=1.14
 pytest>=8
+soundfile>=0.12
