@@ -89,7 +89,7 @@ OUTPUT="$REGISTRY/prepared/tests__quantized-cli"
 [[ -f "$OUTPUT/onnx.cmajor" ]]
 [[ -f "$OUTPUT/model.cmajorpatch" ]]
 [[ -f "$OUTPUT/provenance.json" ]]
-jq -e '.source_sha256 == "'"$HASH"'" and .cmajor_compilation_verified == false' \
+jq -e --arg hash "$HASH" '.source_sha256 == $hash and .cmajor_compilation_verified == false' \
   "$OUTPUT/provenance.json" >/dev/null
 
 if bash "$CLI" prepare tests/quantized-cli >/dev/null 2>&1; then
