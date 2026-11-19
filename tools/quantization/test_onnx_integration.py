@@ -7,7 +7,7 @@ import onnx
 import onnxruntime as ort
 from onnx import TensorProto, helper, numpy_helper
 
-from realm_quant.quantization import ternary_quantize_model, unpack_2bit
+from realm_quant.quantization import quantize_model, ternary_quantize_model, unpack_2bit
 from realm_quant.runtime import compare_models
 
 
@@ -31,6 +31,36 @@ def _make_matmul_model(path: Path) -> np.ndarray:
     onnx.checker.check_model(model)
     onnx.save(model, path)
     return weights
+
+
+def test_fp16_model_is_valid_and_executable(tmp_path):
+    source = tmp_path / "reference.onnx"
+    candidate = tmp_path / "fp16.onnx"
+    _make_matmul_model(source)
+    result = quantize_model(source, candidate, "fp16")
+    assert Path(result["model"]).is_file()
+    converted = onnx.load(candidate)
+    onnx.checker.check_model(converted)
+    assert any(tensor.data_type == TensorProto.FLOAT16 for tensor in converted.graph.initializer)
+    session = ort.InferenceSession(str(candidate), providers=["CPUExecutionProvider"])
+    output = session.run(None, {"features": np.ones((1, 4), dtype=np.float32)})[0]
+    assert output.shape == (1, 4)
+    assert np.isfinite(output).all()
+
+
+def test_dynamic_int8_model_is_valid_and_executable(tmp_path):
+    source = tmp_path / "reference.onnx"
+    candidate = tmp_path / "int8.onnx"
+    _make_matmul_model(source)
+    result = quantize_model(source, candidate, "int8", op_types=("MatMul",))
+    assert result["mode"] == "dynamic-int8"
+    converted = onnx.load(candidate)
+    onnx.checker.check_model(converted)
+    assert any(node.op_type in {"MatMulInteger", "DynamicQuantizeLinear"} for node in converted.graph.node)
+    session = ort.InferenceSession(str(candidate), providers=["CPUExecutionProvider"])
+    output = session.run(None, {"features": np.ones((1, 4), dtype=np.float32)})[0]
+    assert output.shape == (1, 4)
+    assert np.isfinite(output).all()
 
 
 def test_ternary_model_is_executable_and_comparable(tmp_path):
