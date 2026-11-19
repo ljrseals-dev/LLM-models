@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-VERSION="0.2.1-m2"
+VERSION="0.3.0-m3"
 PROG="llm-models"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,7 +31,8 @@ Artifacts:
   verify <id>                   Verify every artifact declared by a manifest
 
 Preparation and deployment:
-  prepare <id>                  Not implemented (M3)
+  prepare <id> [--artifact ID] [--output DIR]
+                                Convert a verified ONNX artifact to a Cmajor patch
   deploy <id>                   Not implemented (M4)
   rollback                       Not implemented (M4)
 
@@ -51,7 +52,10 @@ Security:
   - Hashes are verified when --sha256 is supplied.
   - Downloads without an expected hash remain unverified.
   - Manifest validation fails closed if jq or check-jsonschema is missing.
-  - Preparation and deployment commands return an error until implemented.
+  - prepare requires a verified, self-contained ONNX artifact and Python ONNX dependencies.
+  - Quantized fallback conversion expands supported weights to FLOAT32 Cmajor constants.
+  - Generated patches are not Cmajor-compiled or ONNX Runtime parity-tested by this command.
+  - Deployment remains unimplemented.
 EOF
 }
 
@@ -88,7 +92,8 @@ cmd_status() {
   printf '  REGISTERED               yes\n'
   printf '  DOWNLOADED               yes (HTTPS; resumable partial files)\n'
   printf '  VERIFIED                 yes (SHA-256; fail-closed)\n'
-  printf '  PREPARED / DEPLOYED      not implemented\n'
+  printf '  PREPARED                 ONNX to Cmajor patch (requires Python dependencies)\n'
+  printf '  DEPLOYED                 not implemented\n'
 }
 
 cmd_list() {
@@ -337,11 +342,112 @@ cmd_pull() {
 }
 
 cmd_prepare() {
-  local id="${1:-}"
-  [[ -n "$id" ]] || die "Usage: $PROG prepare <id>"
-  [[ $# -eq 1 ]] || die "prepare does not accept additional arguments until M3 is implemented"
+  local id="\${1:-}" artifact_id="" output=""
+  [[ -n "$id" ]] || die "Usage: $PROG prepare <id> [--artifact ARTIFACT_ID] [--output DIR]"
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --artifact)
+        [[ $# -ge 2 && -n "$2" ]] || die "--artifact requires an artifact ID"
+        artifact_id="$2"; shift 2 ;;
+      --output)
+        [[ $# -ge 2 && -n "$2" ]] || die "--output requires a directory"
+        output="$2"; shift 2 ;;
+      --*)
+        die "Unknown prepare option: $1" ;;
+      *)
+        die "Unexpected prepare argument: $1" ;;
+    esac
+  done
+
   validate_model_id "$id"
-  die "prepare is not implemented yet (planned milestone M3); no files were changed"
+  ensure_registry
+  require_json_tools
+  require_command python3
+  local manifest
+  manifest=$(manifest_path "$id")
+  [[ -f "$manifest" ]] || die "No manifest for model id: $id"
+  validate_manifest "$manifest"
+
+  local index
+  if ! index=$(jq -er --arg aid "$artifact_id" --arg use_aid "$([[ -n "$artifact_id" ]] && echo yes || echo no)" '
+    [.artifacts | to_entries[]
+      | select(((.value.format // "") | ascii_downcase) == "onnx"
+          or ((.value.filename // "") | ascii_downcase | endswith(".onnx")))
+      | select($use_aid == "no" or .value.id == $aid)]
+    | if length == 1 then .[0].key
+      elif length == 0 then error("no matching ONNX artifact found")
+      else error("multiple ONNX artifacts found; specify --artifact ARTIFACT_ID")
+      end
+  ' "$manifest" 2>/dev/null); then
+    die "Could not select exactly one ONNX artifact; specify --artifact if the manifest contains multiple ONNX files"
+  fi
+
+  local selected_id filename expected candidate actual
+  selected_id=$(jq -er ".artifacts[$index].id" "$manifest")
+  filename=$(jq -er ".artifacts[$index].filename" "$manifest")
+  expected=$(jq -er ".artifacts[$index].sha256" "$manifest")
+  validate_filename "$filename"
+  validate_sha256 "$expected"
+  expected=$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')
+  candidate=$(artifact_store_path "$expected")
+  if [[ ! -f "$candidate" ]]; then
+    if [[ -f "$ROOT/$filename" ]]; then
+      candidate="$ROOT/$filename"
+    else
+      die "ONNX artifact is not present locally; pull it first: $selected_id"
+    fi
+  fi
+
+  actual=$(sha256_file "$candidate")
+  if [[ "$actual" != "$expected" ]]; then
+    local qdest
+    mkdir -p "$QUARANTINE_DIR"
+    qdest="$QUARANTINE_DIR/$selected_id.$actual.$(date +%s)"
+    cp -- "$candidate" "$qdest" || die "Could not quarantine mismatched ONNX artifact"
+    write_artifact_validation "$manifest" "$index" "quarantined" "fail" "expected $expected; got $actual"
+    die "ONNX artifact hash mismatch; quarantined copy: $qdest"
+  fi
+  store_artifact "$candidate" "$expected" >/dev/null
+  candidate=$(artifact_store_path "$expected")
+  write_artifact_validation "$manifest" "$index" "verified" "pass" "SHA-256 matched before ONNX preparation"
+
+  local prepared_root safe_id stage_root stage_patch final_output
+  prepared_root="$REGISTRY_DIR/prepared"
+  mkdir -p "$prepared_root"
+  safe_id="\${id//\//__}"
+  if [[ -z "$output" ]]; then
+    final_output="$prepared_root/$safe_id"
+  else
+    final_output="$output"
+    mkdir -p "$(dirname "$final_output")"
+  fi
+  [[ ! -e "$final_output" && ! -L "$final_output" ]] ||
+    die "Output already exists; refusing to overwrite: $final_output"
+
+  stage_root=$(mktemp -d "$prepared_root/.prepare.XXXXXX")
+  stage_patch="$stage_root/patch"
+  log "Preparing verified ONNX artifact $selected_id ..."
+  if ! python3 "$ROOT/tools/onnx/prepare_model.py" \
+      --model "$candidate" --output "$stage_patch" \
+      --model-id "$id" --artifact-id "$selected_id" --sha256 "$expected"; then
+    rm -rf -- "$stage_root"
+    die "ONNX-to-Cmajor preparation failed; no final output was published"
+  fi
+
+  if ! mv -n -- "$stage_patch" "$final_output"; then
+    rm -rf -- "$stage_root"
+    die "Could not publish prepared patch to $final_output"
+  fi
+  if [[ -e "$stage_patch" ]]; then
+    rm -rf -- "$stage_root"
+    die "Output path appeared concurrently; staged patch retained at $stage_patch"
+  fi
+  rmdir "$stage_root" 2>/dev/null || true
+  ok "Prepared Cmajor patch for $id"
+  printf '  Output: %s\n' "$final_output"
+  printf '  Provenance: %s/provenance.json\n' "$final_output"
+  audit_log "PREPARE id=$id artifact=$selected_id source_sha256=$expected output=$final_output"
 }
 
 cmd_deploy() {
