@@ -713,47 +713,65 @@ def prepare_quantized_model(model):
 
 
 def main(argv):
-    if len(argv) == 0:
+    if not argv:
         usage()
-        exit(1)
+        return 1
 
     try:
-        opts, args = getopt.getopt (argv, "h", ["patchDir=", "model="])
-    except getopt.GetoptError as e:
-        print (f"{e}")
+        opts, args = getopt.getopt(argv, "h", ["patchDir=", "model="])
+    except getopt.GetoptError as exc:
+        print(f"Invalid arguments: {exc}", file=sys.stderr)
         usage()
-        exit (1)
+        return 2
 
     patchDir = None
     model = None
-
     for opt, arg in opts:
-        if opt in ("-h"):
+        if opt == "-h":
             usage()
-            exit (1)
-
-        if opt in ("--patchDir"):
+            return 0
+        if opt == "--patchDir":
+            if patchDir is not None:
+                print("Model conversion refused: --patchDir may be specified only once", file=sys.stderr)
+                return 2
             patchDir = arg
-
-        if opt in ("--model"):
+        elif opt == "--model":
+            if model is not None:
+                print("Model conversion refused: --model may be specified only once", file=sys.stderr)
+                return 2
             model = arg
 
-    if model == None:
+    if model is None:
+        if len(args) != 1:
+            print("Model conversion refused: provide exactly one model path or --model <file>", file=sys.stderr)
+            return 2
         model = args[0]
+    elif args:
+        print("Model conversion refused: unexpected positional argument(s): " + " ".join(args), file=sys.stderr)
+        return 2
 
-    onnxModel = onnx.load (model)
     try:
-        onnx.checker.check_model (onnxModel)
+        if not os.path.isfile(model):
+            raise ValueError(f"ONNX model file not found or not regular: {model}")
+        onnxModel = onnx.load(model, load_external_data=False)
+        external = [
+            tensor.name or "<unnamed>"
+            for tensor in onnxModel.graph.initializer
+            if tensor.data_location == onnx.TensorProto.EXTERNAL or tensor.external_data
+        ]
+        if external:
+            raise ValueError("external ONNX tensor data is not supported: " + ", ".join(external))
+        onnx.checker.check_model(onnxModel)
         prepare_quantized_model(onnxModel)
         inferredModel = shape_inference.infer_shapes(onnxModel)
         onnx.checker.check_model(inferredModel)
-        generateNodesAndConnections (inferredModel)
-    except (onnx.checker.ValidationError, ValueError, RuntimeError) as e:
-        print (f"Model conversion refused: {e}", file=sys.stderr)
-        exit(2)
+        generateNodesAndConnections(inferredModel)
+        printCmajor(patchDir)
+    except Exception as exc:
+        print(f"Model conversion refused: {exc}", file=sys.stderr)
+        return 2
+    return 0
 
-    printCmajor (patchDir)
 
-if __name__== "__main__" :
-    main (sys.argv[1:])
-    exit()
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
