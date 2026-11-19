@@ -155,10 +155,11 @@ cmd_register() {
     rm -f -- "$tmp"
     die "Could not stage manifest"
   fi
-  if ! mv -n -- "$tmp" "$dest"; then
+  if ! ln -- "$tmp" "$dest"; then
     rm -f -- "$tmp"
-    die "Could not publish manifest"
+    die "Manifest already exists or could not be published"
   fi
+  rm -f -- "$tmp"
   [[ -f "$dest" ]] || die "Manifest publication failed"
   ok "Registered $id (version $version)"
   printf '  Stored at: %s\n' "$dest"
