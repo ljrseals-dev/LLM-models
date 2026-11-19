@@ -27,7 +27,7 @@ jobs:
       - name: Check shell syntax
         run: |
           bash -n cli/llm-models lib/common.sh scripts/smoke-test.sh
-          shellcheck cli/llm-models lib/common.sh scripts/smoke-test.sh
+          shellcheck -x cli/llm-models lib/common.sh scripts/smoke-test.sh
 
       - name: Run isolated regression tests
         run: bash scripts/smoke-test.sh
