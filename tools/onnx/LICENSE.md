@@ -9,6 +9,6 @@ The following files are Cmajor-origin files or derived from them and retain thei
 - patchTemplate/model.cmajorpatch
 - patchTemplate/onnx.cmajor
 
-This tool is kept in its own directory because it has licensing terms distinct from the rest of this repository. Do not remove or override the Cmajor notices. Users distributing or modifying these files must comply with GPL-3.0-or-later or obtain the appropriate commercial licence from Cmajor Software Ltd.
+This tool is kept in its own directory because it has licensing terms distinct from the rest of this repository. Do not remove or override the Cmajor notices. A copy of GPL-3.0-or-later is included as GPL-3.0-or-later.txt. Users distributing or modifying these files must comply with that licence or obtain the appropriate commercial licence from Cmajor Software Ltd.
 
 The numeric fallback implementation at src/schema_review/fallback_runtime.py is from ljrseals-dev/schema and is distributed under that repository's MIT licence. It is separately licensed from the Cmajor-origin files.
