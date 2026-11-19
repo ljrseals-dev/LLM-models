@@ -62,7 +62,9 @@ bash tools/onnx/test_cli_prepare.sh
 
 The tests cover numeric fallback transforms, INT8 per-axis dequantization, packed ternary decoding, malformed/unsupported cases, hash refusal, patch generation, provenance hashes, and the registry CLI lifecycle.
 
-The tests do **not** prove that generated Cmajor compiles, that all model operators are supported, or that Cmajor execution matches ONNX Runtime. A Cmajor compiler/runtime and ONNX Runtime parity suite remain separate acceptance gates. Unsupported operators are rejected rather than approximated.
+The historical Cmajor template contains explicit compile-time stubs for LSTM, Slice, Gather, and Concat; the emitter now rejects these operators before code generation rather than emitting a patch that cannot compile. The converter also supports only the narrow operator subset represented by the bundled template.
+
+The tests do **not** prove that generated Cmajor compiles, that all model operators are supported, or that Cmajor execution matches ONNX Runtime. A Cmajor compiler/runtime and ONNX Runtime parity suite remain separate acceptance gates. Unsupported operators and unimplemented template stubs are rejected rather than approximated.
 
 ## Licensing
 
