@@ -4,13 +4,13 @@
 
 set -euo pipefail
 
-if [[ -n "\${LLM_MODELS_ROOT:-}" ]]; then
+if [[ -n "${LLM_MODELS_ROOT:-}" ]]; then
   ROOT="$LLM_MODELS_ROOT"
 else
-  ROOT="$(cd "$(dirname "\${BASH_SOURCE[0]}")/.." && pwd)"
+  ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fi
 
-REGISTRY_DIR="\${LLM_MODELS_REGISTRY:-$ROOT/registry}"
+REGISTRY_DIR="${LLM_MODELS_REGISTRY:-$ROOT/registry}"
 MANIFESTS_DIR="$REGISTRY_DIR/manifests"
 ARTIFACTS_DIR="$REGISTRY_DIR/artifacts"
 DOWNLOADS_DIR="$REGISTRY_DIR/downloads"
@@ -76,7 +76,7 @@ manifest_path() {
   local id="$1"
   validate_model_id "$id"
   local safe
-  safe="\${id//\//__}"
+  safe="${id//\//__}"
   printf '%s/%s.manifest.json\n' "$MANIFESTS_DIR" "$safe"
 }
 
@@ -129,12 +129,12 @@ artifact_store_path() {
   local hash="$1"
   validate_sha256 "$hash"
   hash="$(printf '%s' "$hash" | tr '[:upper:]' '[:lower:]')"
-  printf '%s/%s/%s\n' "$ARTIFACTS_DIR" "\${hash:0:2}" "$hash"
+  printf '%s/%s/%s\n' "$ARTIFACTS_DIR" "${hash:0:2}" "$hash"
 }
 
 store_artifact() {
   local src="$1"
-  local expected_hash="\${2:-}"
+  local expected_hash="${2:-}"
   [[ -f "$src" ]] || die "Artifact file not found: $src"
 
   if [[ -n "$expected_hash" ]]; then
