@@ -437,8 +437,8 @@ cmd_quantize() {
     final_output="$quantized_root/$safe_id/$mode"
   else
     final_output="$output"
-    mkdir -p "$(dirname "$final_output")"
   fi
+  mkdir -p "$(dirname "$final_output")"
   [[ ! -e "$final_output" && ! -L "$final_output" ]] ||
     die "Output already exists; refusing to overwrite: $final_output"
 
