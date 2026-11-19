@@ -97,6 +97,13 @@ def tensor_type_counts(model) -> dict[str, int]:
     return counts
 
 
+def patch_identifier(model_id: str) -> str:
+    """Create a stable Cmajor patch ID without lossy-slug collisions."""
+    slug = re.sub(r"[^a-z0-9]+", "-", model_id.lower()).strip("-") or "model"
+    suffix = hashlib.sha256(model_id.encode("utf-8")).hexdigest()[:12]
+    return f"org.llm-models.generated.{slug}.{suffix}"
+
+
 def prepare(args) -> dict:
     source = Path(args.model)
     output = Path(args.output)
@@ -137,8 +144,7 @@ def prepare(args) -> dict:
 
         patch_manifest_path = output / "model.cmajorpatch"
         patch_manifest = json.loads(patch_manifest_path.read_text(encoding="utf-8"))
-        slug = re.sub(r"[^a-z0-9]+", "-", args.model_id.lower()).strip("-") or "model"
-        patch_manifest["ID"] = f"org.llm-models.generated.{slug}"
+        patch_manifest["ID"] = patch_identifier(args.model_id)
         patch_manifest["name"] = args.model_id
         patch_manifest["manufacturer"] = "LLM-models"
         patch_manifest["description"] = f"Generated from verified ONNX artifact {args.artifact_id}"
