@@ -1,21 +1,16 @@
 #!/usr/bin/env bash
 # llm-models — local-first model registry CLI
-# Implements M1 (registry foundation) + M2 (distribution & verification) foundation
+# M1 registry, M2 distribution, and M3 ONNX quantization / Cmajor preparation.
 
 set -euo pipefail
 
-VERSION="0.2.0-m2"
+VERSION="0.4.0-m3"
 PROG="llm-models"
 
-# Locate library relative to this script
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-# shellcheck source=../lib/common.sh
+# shellcheck source=lib/common.sh
 source "$ROOT/lib/common.sh"
-
-# ---------------------------------------------------------------------------
-# Usage
-# ---------------------------------------------------------------------------
 
 usage() {
   cat <<EOF
@@ -24,21 +19,24 @@ $PROG $VERSION — local-first model registry
 Usage:
   $PROG <command> [options]
 
-Registry & inspection:
+Registry:
   list                          List registered models
-  inspect <id>                  Show manifest details
+  inspect <id>                  Show a registered manifest
   status                        Registry and host summary
+  register <manifest.json>      Validate and register a manifest
 
-Registration & verification (M1/M2):
-  register <manifest.json>      Register a model from a manifest file
-  verify <id>                   Verify all artifacts for a model (SHA-256)
-  pull <url> [--sha256 HASH] [--filename NAME]
-                                Download an artifact, verify hash, store it
+Artifacts:
+  pull <https-url> [--sha256 HASH] [--filename NAME]
+                                Download to the content-addressed store
+  verify <id>                   Verify every artifact declared by a manifest
 
-Preparation & deployment (scaffolded — later milestones):
-  prepare <id> [--quant METHOD] Placeholder for quantization / conversion
-  deploy <id>                   Placeholder for local runtime launch
-  rollback                      Placeholder for rollback
+Preparation and deployment:
+  quantize <id> --mode fp16|int8|ternary [options]
+                                Create a derived quantized ONNX artifact set
+  prepare <id> [--artifact ID] [--output DIR]
+                                Convert a verified ONNX artifact to a Cmajor patch
+  deploy <id>                   Not implemented (M4)
+  rollback                       Not implemented (M4)
 
 Other:
   help                          Show this help
@@ -48,220 +46,220 @@ Environment:
   LLM_MODELS_ROOT       Override repository root
   LLM_MODELS_REGISTRY   Override registry directory (default: ./registry)
 
-Notes:
-  - Models are never considered verified just because they downloaded.
-  - Failed verification places artifacts in quarantine/.
-  - See docs/VISION.md and docs/MANIFEST.md for the full design.
+Dependencies:
+  bash, jq, check-jsonschema, curl or wget, and sha256sum or shasum.
+  Quantization additionally requires python3, NumPy, ONNX, ONNX Runtime, and onnxconverter-common
+  for FP16 (see tools/quantization/requirements.txt). Cmajor preparation uses tools/onnx/requirements.txt.
+
+Security:
+  - Downloads require HTTPS and redirects remain HTTPS.
+  - Hashes are verified when --sha256 is supplied.
+  - Downloads without an expected hash remain unverified.
+  - Manifest validation fails closed if jq or check-jsonschema is missing.
+  - quantize and prepare require verified, self-contained ONNX artifacts and Python dependencies.
+  - quantize supports FP16, dynamic INT8, and packed ternary sidecars.
+  - Cmajor fallback conversion expands supported weights to FLOAT32 constants; it is not a compression-preserving runtime.
+  - Quantized ONNX models are tested separately; generated Cmajor patches are not compiler- or parity-verified.
+  - Deployment remains unimplemented.
 EOF
 }
 
-# ---------------------------------------------------------------------------
-# Commands
-# ---------------------------------------------------------------------------
-
-cmd_version() {
-  echo "$PROG $VERSION"
-}
+cmd_version() { printf '%s %s\n' "$PROG" "$VERSION"; }
 
 cmd_status() {
   ensure_registry
-  local count
+  local count schema_state
   count=$(list_manifests | wc -l | tr -d ' ')
-  echo "LLM-models registry status"
-  echo "  Version:     $VERSION"
-  echo "  Root:        $ROOT"
-  echo "  Registry:    $REGISTRY_DIR"
-  echo "  Manifests:   $count"
-  echo "  Schema:      $( [[ -f "$SCHEMA_FILE" ]] && echo present || echo missing )"
-  echo ""
-  echo "Host (best-effort):"
+  schema_state="missing"
+  [[ -r "$SCHEMA_FILE" ]] && schema_state="present"
+  printf 'LLM-models registry status\n'
+  printf '  Version:     %s\n' "$VERSION"
+  printf '  Root:        %s\n' "$ROOT"
+  printf '  Registry:    %s\n' "$REGISTRY_DIR"
+  printf '  Manifests:   %s\n' "$count"
+  printf '  Schema:      %s\n' "$schema_state"
+  printf '\nHost (best-effort):\n'
   if command -v free >/dev/null 2>&1; then
     local mem
     mem=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}') || mem="unknown"
-    echo "  Memory:      ${mem} MB"
+    printf '  Memory:      %s MB\n' "${mem:-unknown}"
   else
-    echo "  Memory:      unknown"
+    printf '  Memory:      unknown\n'
   fi
-  echo "  Arch:        $(uname -m 2>/dev/null || echo unknown)"
-  echo "  OS:          $(uname -s 2>/dev/null || echo unknown)"
+  printf '  Arch:        %s\n' "$(uname -m 2>/dev/null || echo unknown)"
+  printf '  OS:          %s\n' "$(uname -s 2>/dev/null || echo unknown)"
   if command -v nvidia-smi >/dev/null 2>&1; then
-    echo "  GPU:         nvidia-smi present"
+    printf '  GPU:         nvidia-smi present\n'
   else
-    echo "  GPU:         no nvidia-smi"
+    printf '  GPU:         no nvidia-smi detected\n'
   fi
-  echo ""
-  echo "Lifecycle stages implemented:"
-  echo "  DISCOVERED / REGISTERED  → yes (register, list, inspect)"
-  echo "  DOWNLOADED               → yes (pull)"
-  echo "  VERIFIED                 → yes (verify, hash checks)"
-  echo "  PREPARED / DEPLOYED      → scaffold only"
+  printf '\nLifecycle stages implemented:\n'
+  printf '  REGISTERED               yes\n'
+  printf '  DOWNLOADED               yes (HTTPS; resumable partial files)\n'
+  printf '  VERIFIED                 yes (SHA-256; fail-closed)\n'
+  printf '  QUANTIZED                FP16 / dynamic INT8 / ternary (requires Python dependencies)\n'
+  printf '  PREPARED                 ONNX to Cmajor patch (requires Python dependencies)\n'
+  printf '  DEPLOYED                 not implemented\n'
 }
 
 cmd_list() {
   ensure_registry
+  require_command jq
   local files
   files=$(list_manifests)
   if [[ -z "$files" ]]; then
-    echo "No models registered."
-    echo "Use: $PROG register <manifest.json>"
+    printf 'No models registered.\nUse: %s register <manifest.json>\n' "$PROG"
     return 0
   fi
-  printf "%-32s  %-16s  %-12s  %s\n" "ID" "VERSION" "PUBLISHER" "NAME"
-  printf "%-32s  %-16s  %-12s  %s\n" "--------------------------------" "----------------" "------------" "----"
-  while IFS= read -r f; do
-    [[ -z "$f" ]] && continue
+  printf '%-32s  %-20s  %-18s  %s\n' "ID" "VERSION" "PUBLISHER" "NAME"
+  printf '%-32s  %-20s  %-18s  %s\n' "--------------------------------" "--------------------" "------------------" "----"
+  while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
     local id version publisher name
-    id=$(json_get "$f" "id")
-    version=$(json_get "$f" "version")
-    publisher=$(json_get "$f" "publisher")
-    name=$(json_get "$f" "name")
-    printf "%-32s  %-16s  %-12s  %s\n" "${id:-?}" "${version:-?}" "${publisher:-?}" "${name:-?}"
+    id=$(jq -r '.id // "?"' "$file")
+    version=$(jq -r '.version // "?"' "$file")
+    publisher=$(jq -r '.publisher // "?"' "$file")
+    name=$(jq -r '.name // "?"' "$file")
+    printf '%-32s  %-20s  %-18s  %s\n' "$id" "$version" "$publisher" "$name"
   done <<< "$files"
 }
 
 cmd_inspect() {
   local id="${1:-}"
   [[ -n "$id" ]] || die "Usage: $PROG inspect <model-id>"
-
+  validate_model_id "$id"
   ensure_registry
-  local path
+  require_command jq
+  local path stored_id
   path=$(manifest_path "$id")
-  if [[ ! -f "$path" ]]; then
-    local candidates
-    candidates=$(find "$MANIFESTS_DIR" -name "*${id}*.manifest.json" 2>/dev/null | head -5)
-    if [[ -z "$candidates" ]]; then
-      die "No manifest found for id: $id"
-    fi
-    echo "Exact id not found. Candidates:"
-    echo "$candidates"
-    return 1
-  fi
-
-  echo "Manifest: $path"
-  echo "----------------------------------------"
-  if command -v jq >/dev/null 2>&1; then
-    jq . "$path"
-  else
-    cat "$path"
-  fi
+  [[ -f "$path" ]] || die "No manifest found for id: $id"
+  stored_id=$(jq -er '.id' "$path") || die "Stored manifest is invalid JSON"
+  [[ "$stored_id" == "$id" ]] || die "Manifest path collision: expected '$id', found '$stored_id'"
+  printf 'Manifest: %s\n' "$path"
+  printf '%s\n' '----------------------------------------'
+  jq . "$path"
 }
 
 cmd_register() {
   local manifest="${1:-}"
   [[ -n "$manifest" ]] || die "Usage: $PROG register <manifest.json>"
-  [[ -f "$manifest" ]] || die "File not found: $manifest"
+  [[ -f "$manifest" && -r "$manifest" ]] || die "Manifest file not found or unreadable: $manifest"
 
   ensure_registry
+  validate_manifest "$manifest"
 
-  local id version
-  id=$(json_get "$manifest" "id")
-  version=$(json_get "$manifest" "version")
-  [[ -n "$id" ]] || die "Manifest missing required field: id"
-  [[ -n "$version" ]] || die "Manifest missing required field: version"
-
-  local dest
+  local id version dest existing_id tmp
+  id=$(jq -er '.id' "$manifest")
+  version=$(jq -er '.version' "$manifest")
   dest=$(manifest_path "$id")
-  if [[ -f "$dest" ]]; then
-    warn "Manifest already exists for $id — overwriting"
+
+  if [[ -e "$dest" ]]; then
+    existing_id=$(jq -r '.id // empty' "$dest" 2>/dev/null || true)
+    if [[ "$existing_id" != "$id" ]]; then
+      die "Model id filename collision: '$id' conflicts with '$existing_id'"
+    fi
+    die "Model '$id' is already registered (version $(jq -r '.version // "unknown"' "$dest")); registration is immutable"
   fi
 
-  cp "$manifest" "$dest"
+  tmp=$(mktemp "$MANIFESTS_DIR/.manifest.XXXXXX")
+  if ! cp -- "$manifest" "$tmp"; then
+    rm -f -- "$tmp"
+    die "Could not stage manifest"
+  fi
+  if ! ln -- "$tmp" "$dest"; then
+    rm -f -- "$tmp"
+    die "Manifest already exists or could not be published"
+  fi
+  rm -f -- "$tmp"
+  [[ -f "$dest" ]] || die "Manifest publication failed"
   ok "Registered $id (version $version)"
-  echo "  Stored at: $dest"
-  audit_log "REGISTER id=$id version=$version source=$manifest"
+  printf '  Stored at: %s\n' "$dest"
+  audit_log "REGISTER id=$id version=$version"
+}
+
+write_artifact_validation() {
+  local manifest_pathname="$1"
+  local index="$2"
+  local status="$3"
+  local result="$4"
+  local details="$5"
+  local tmp
+  tmp=$(mktemp "$(dirname "$manifest_pathname")/.manifest-update.XXXXXX")
+  if ! jq --argjson idx "$index" --arg status "$status" \
+      --arg result "$result" --arg details "$details" \
+      --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+      '.artifacts[$idx].validation = {
+        "status": $status,
+        "checked_at": $ts,
+        "checks": [{"name":"sha256","result":$result,"details":$details}]
+      }' "$manifest_pathname" > "$tmp"; then
+    rm -f -- "$tmp"
+    die "Could not update validation record"
+  fi
+  chmod --reference="$manifest_pathname" "$tmp" 2>/dev/null || true
+  mv -f -- "$tmp" "$manifest_pathname"
 }
 
 cmd_verify() {
   local id="${1:-}"
   [[ -n "$id" ]] || die "Usage: $PROG verify <model-id>"
-
+  validate_model_id "$id"
   ensure_registry
-  local path
+  require_json_tools
+
+  local path stored_id n i failed=0 count=0
   path=$(manifest_path "$id")
   [[ -f "$path" ]] || die "No manifest for id: $id"
+  validate_manifest "$path"
+  stored_id=$(jq -er '.id' "$path")
+  [[ "$stored_id" == "$id" ]] || die "Manifest id mismatch"
+  n=$(jq -er '.artifacts | length' "$path")
+  (( n > 0 )) || die "Manifest contains no artifacts"
 
-  log "Verifying artifacts for $id ..."
-
-  if ! command -v jq >/dev/null 2>&1; then
-    warn "jq not installed — limited verification"
-    warn "Install jq for full manifest-driven verification"
-    audit_log "VERIFY id=$id result=limited_no_jq"
-    return 0
-  fi
-
-  local failed=0
-  local count=0
-  local n
-  n=$(jq '.artifacts | length' "$path")
-
+  log "Verifying $n artifact(s) for $id ..."
   for ((i=0; i<n; i++)); do
-    local art_id filename expected role
-    art_id=$(jq -r ".artifacts[$i].id" "$path")
-    filename=$(jq -r ".artifacts[$i].filename" "$path")
-    expected=$(jq -r ".artifacts[$i].sha256" "$path")
-    role=$(jq -r ".artifacts[$i].role" "$path")
-
+    local art_id filename expected role candidate actual qname qdest
+    art_id=$(jq -er ".artifacts[$i].id" "$path")
+    filename=$(jq -er ".artifacts[$i].filename" "$path")
+    expected=$(jq -er ".artifacts[$i].sha256" "$path")
+    role=$(jq -er ".artifacts[$i].role" "$path")
+    validate_sha256 "$expected"
+    expected=$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')
     count=$((count+1))
-    echo ""
     log "Artifact: $art_id ($role) — $filename"
-    log "Expected SHA-256: $expected"
 
-    local stored
-    stored=$(artifact_store_path "$expected")
-    local candidate=""
-    if [[ -f "$stored" ]]; then
-      candidate="$stored"
-    elif [[ -f "$filename" ]]; then
-      candidate="$filename"
-    elif [[ -f "$ROOT/$filename" ]]; then
-      candidate="$ROOT/$filename"
+    candidate=$(artifact_store_path "$expected")
+    if [[ ! -f "$candidate" ]]; then
+      # Only accept a simple file in the repository root as a legacy import path.
+      validate_filename "$filename"
+      if [[ -f "$ROOT/$filename" ]]; then
+        candidate="$ROOT/$filename"
+      else
+        warn "Artifact file not found locally for $art_id"
+        write_artifact_validation "$path" "$i" "failed" "skipped" "artifact not found"
+        failed=$((failed+1))
+        continue
+      fi
     fi
 
-    if [[ -z "$candidate" ]]; then
-      warn "Artifact file not found locally for $art_id"
-      warn "Use: $PROG pull <url> --sha256 $expected --filename $filename"
-      failed=$((failed+1))
-      continue
-    fi
-
-    local actual
     actual=$(sha256_file "$candidate")
     if [[ "$actual" == "$expected" ]]; then
-      ok "Hash match for $art_id"
       store_artifact "$candidate" "$expected" >/dev/null
-      local tmp
-      tmp=$(mktemp)
-      jq --argjson idx "$i" \
-         --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-         '.artifacts[$idx].validation = {
-            "status": "verified",
-            "checked_at": $ts,
-            "checks": [{"name":"sha256","result":"pass","details":"matched"}]
-          }' "$path" > "$tmp" && mv "$tmp" "$path"
+      write_artifact_validation "$path" "$i" "verified" "pass" "SHA-256 matched"
+      ok "Hash match for $art_id"
     else
-      err "Hash MISMATCH for $art_id"
-      err "  expected: $expected"
-      err "  actual:   $actual"
+      err "Hash mismatch for $art_id (expected $expected, got $actual)"
+      qname=$(printf '%s' "$art_id" | tr -c 'A-Za-z0-9._-' '_')
+      qdest="$QUARANTINE_DIR/$qname.$actual.$(date +%s)"
       mkdir -p "$QUARANTINE_DIR"
-      local qdest="$QUARANTINE_DIR/${art_id}.$(date +%s)"
-      cp "$candidate" "$qdest" 2>/dev/null || true
-      warn "Copied suspect file to quarantine: $qdest"
-      local tmp
-      tmp=$(mktemp)
-      jq --argjson idx "$i" \
-         --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-         --arg det "expected $expected got $actual" \
-         '.artifacts[$idx].validation = {
-            "status": "quarantined",
-            "checked_at": $ts,
-            "checks": [{"name":"sha256","result":"fail","details":$det}]
-          }' "$path" > "$tmp" && mv "$tmp" "$path"
+      cp -- "$candidate" "$qdest" || die "Could not quarantine mismatched artifact"
+      write_artifact_validation "$path" "$i" "quarantined" "fail" "expected $expected; got $actual"
+      warn "Suspect artifact copied to quarantine: $qdest"
       failed=$((failed+1))
     fi
   done
 
-  echo ""
-  if [[ $failed -eq 0 ]]; then
+  if (( failed == 0 )); then
     ok "All $count artifact(s) verified for $id"
     audit_log "VERIFY id=$id result=ok count=$count"
   else
@@ -272,146 +270,343 @@ cmd_verify() {
 }
 
 cmd_pull() {
-  local url=""
-  local expected_hash=""
-  local filename=""
-
+  local url="" expected_hash="" filename=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --sha256) expected_hash="${2:-}"; shift 2 ;;
-      --filename) filename="${2:-}"; shift 2 ;;
-      --*) die "Unknown option: $1" ;;
+      --sha256)
+        [[ $# -ge 2 && -n "$2" ]] || die "--sha256 requires a digest"
+        expected_hash="$2"; shift 2 ;;
+      --filename)
+        [[ $# -ge 2 && -n "$2" ]] || die "--filename requires a value"
+        filename="$2"; shift 2 ;;
+      --*)
+        die "Unknown option: $1" ;;
       *)
-        if [[ -z "$url" ]]; then
-          url="$1"
-          shift
-        else
-          die "Unexpected argument: $1"
-        fi
-        ;;
+        if [[ -z "$url" ]]; then url="$1"; shift
+        else die "Unexpected argument: $1"; fi ;;
     esac
   done
 
-  [[ -n "$url" ]] || die "Usage: $PROG pull <url> [--sha256 HASH] [--filename NAME]"
+  [[ -n "$url" ]] || die "Usage: $PROG pull <https-url> [--sha256 HASH] [--filename NAME]"
+  [[ "$url" == https://* ]] || die "Only HTTPS download URLs are accepted"
+  if [[ -n "$expected_hash" ]]; then validate_sha256 "$expected_hash"; fi
 
   ensure_registry
-
   if [[ -z "$filename" ]]; then
-    filename=$(basename "$url")
-    filename="${filename%%\?*}"
+    local url_path
+    url_path="${url%%\?*}"
+    url_path="${url_path%%\#*}"
+    filename="${url_path##*/}"
   fi
+  validate_filename "$filename"
 
-  local tmpdir
-  tmpdir=$(mktemp -d)
-  local dest="$tmpdir/$filename"
-
-  log "Downloading: $url"
-  log "Destination: $dest"
-
-  if command -v curl >/dev/null 2>&1; then
-    curl -fL --retry 3 --retry-delay 2 -o "$dest" "$url" \
-      || { rm -rf "$tmpdir"; die "Download failed"; }
-  elif command -v wget >/dev/null 2>&1; then
-    wget -O "$dest" "$url" \
-      || { rm -rf "$tmpdir"; die "Download failed"; }
+  local url_hash part actual stored_hash
+  if command -v sha256sum >/dev/null 2>&1; then
+    url_hash=$(printf '%s' "$url" | sha256sum | awk '{print $1}')
+  elif command -v shasum >/dev/null 2>&1; then
+    url_hash=$(printf '%s' "$url" | shasum -a 256 | awk '{print $1}')
   else
-    rm -rf "$tmpdir"
+    die "No SHA-256 tool found (need sha256sum or shasum)"
+  fi
+  part="$DOWNLOADS_DIR/$url_hash.part"
+
+  log "Downloading artifact: $filename (URL SHA-256: $url_hash)"
+  log "Partial file: $part"
+  if command -v curl >/dev/null 2>&1; then
+    curl --proto '=https' --proto-redir '=https' --fail --location \
+      --retry 3 --retry-delay 2 --continue-at - --output "$part" "$url" ||
+      die "Download failed; any partial data was retained for a later resume"
+  elif command -v wget >/dev/null 2>&1; then
+    wget --https-only --continue --output-document="$part" "$url" ||
+      die "Download failed; any partial data was retained for a later resume"
+  else
     die "Need curl or wget to download"
   fi
 
-  local actual
-  actual=$(sha256_file "$dest")
+  actual=$(sha256_file "$part")
   log "Downloaded SHA-256: $actual"
 
   if [[ -n "$expected_hash" ]]; then
+    expected_hash=$(printf '%s' "$expected_hash" | tr '[:upper:]' '[:lower:]')
     if [[ "$actual" != "$expected_hash" ]]; then
-      mkdir -p "$QUARANTINE_DIR"
-      mv "$dest" "$QUARANTINE_DIR/$filename.$actual"
-      rm -rf "$tmpdir"
-      die "Hash mismatch — file moved to quarantine
-  expected: $expected_hash
-  actual:   $actual"
+      local qdest
+      qdest="$QUARANTINE_DIR/$filename.$actual.$(date +%s)"
+      mv -- "$part" "$qdest"
+      die "Hash mismatch; downloaded file moved to quarantine: $qdest (expected $expected_hash, got $actual)"
     fi
     ok "Hash verified"
   else
-    warn "No --sha256 provided; artifact stored as unverified"
+    warn "No --sha256 supplied; artifact will remain unverified"
   fi
 
-  local stored_hash
-  stored_hash=$(store_artifact "$dest" "${expected_hash:-}")
-  rm -rf "$tmpdir"
+  stored_hash=$(store_artifact "$part" "$expected_hash")
+  rm -f -- "$part"
+  ok "Artifact stored"
+  printf '  SHA-256: %s\n' "$stored_hash"
+  printf '  Path:    %s\n' "$(artifact_store_path "$stored_hash")"
+  audit_log "PULL filename=$filename url_sha256=$url_hash sha256=$stored_hash verified=$([[ -n "$expected_hash" ]] && echo yes || echo no)"
+}
 
-  ok "Artifact available in registry store"
-  echo "  SHA-256: $stored_hash"
-  echo "  Path:    $(artifact_store_path "$stored_hash")"
-  audit_log "PULL url=$url sha256=$stored_hash verified=$([[ -n "$expected_hash" ]] && echo yes || echo no)"
+cmd_quantize() {
+  local id="${1:-}" mode="" artifact_id="" output="" threshold_ratio="0.7" op_types="MatMul,Gemm"
+  [[ -n "$id" ]] || die "Usage: $PROG quantize <id> --mode fp16|int8|ternary [--artifact ID] [--output DIR]"
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --mode)
+        [[ $# -ge 2 && -n "$2" ]] || die "--mode requires fp16, int8, or ternary"
+        mode="$2"; shift 2 ;;
+      --artifact)
+        [[ $# -ge 2 && -n "$2" ]] || die "--artifact requires an artifact ID"
+        artifact_id="$2"; shift 2 ;;
+      --output)
+        [[ $# -ge 2 && -n "$2" ]] || die "--output requires a directory"
+        output="$2"; shift 2 ;;
+      --threshold-ratio)
+        [[ $# -ge 2 && -n "$2" ]] || die "--threshold-ratio requires a number"
+        threshold_ratio="$2"; shift 2 ;;
+      --op-types)
+        [[ $# -ge 2 && -n "$2" ]] || die "--op-types requires a comma-separated list"
+        op_types="$2"; shift 2 ;;
+      --*)
+        die "Unknown quantize option: $1" ;;
+      *)
+        die "Unexpected quantize argument: $1" ;;
+    esac
+  done
+  [[ "$mode" == "fp16" || "$mode" == "int8" || "$mode" == "ternary" ]] ||
+    die "quantize requires --mode fp16, int8, or ternary"
+
+  validate_model_id "$id"
+  ensure_registry
+  require_json_tools
+  require_command python3
+  local manifest
+  manifest=$(manifest_path "$id")
+  [[ -f "$manifest" ]] || die "No manifest for model id: $id"
+  validate_manifest "$manifest"
+
+  local index
+  if ! index=$(jq -er --arg aid "$artifact_id" --arg use_aid "$([[ -n "$artifact_id" ]] && echo yes || echo no)" '
+    [.artifacts | to_entries[]
+      | select(((.value.format // "") | ascii_downcase) == "onnx"
+          or ((.value.filename // "") | ascii_downcase | endswith(".onnx")))
+      | select($use_aid == "no" or .value.id == $aid)]
+    | if length == 1 then .[0].key
+      elif length == 0 then error("no matching ONNX artifact found")
+      else error("multiple ONNX artifacts found; specify --artifact ARTIFACT_ID")
+      end
+  ' "$manifest" 2>/dev/null); then
+    die "Could not select exactly one ONNX artifact; specify --artifact if the manifest contains multiple ONNX files"
+  fi
+
+  local selected_id filename expected candidate actual
+  selected_id=$(jq -er ".artifacts[$index].id" "$manifest")
+  filename=$(jq -er ".artifacts[$index].filename" "$manifest")
+  expected=$(jq -er ".artifacts[$index].sha256" "$manifest")
+  validate_filename "$filename"
+  validate_sha256 "$expected"
+  expected=$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')
+  candidate=$(artifact_store_path "$expected")
+  if [[ ! -f "$candidate" ]]; then
+    if [[ -f "$ROOT/$filename" ]]; then
+      candidate="$ROOT/$filename"
+    else
+      die "ONNX artifact is not present locally; pull it first: $selected_id"
+    fi
+  fi
+  actual=$(sha256_file "$candidate")
+  if [[ "$actual" != "$expected" ]]; then
+    local qname qdest
+    qname=$(printf '%s' "$selected_id" | tr -c 'A-Za-z0-9._-' '_')
+    mkdir -p "$QUARANTINE_DIR"
+    qdest="$QUARANTINE_DIR/$qname.$actual.$(date +%s)"
+    cp -- "$candidate" "$qdest" || die "Could not quarantine mismatched ONNX artifact"
+    write_artifact_validation "$manifest" "$index" "quarantined" "fail" "expected $expected; got $actual"
+    die "ONNX artifact hash mismatch; quarantined copy: $qdest"
+  fi
+  store_artifact "$candidate" "$expected" >/dev/null
+  candidate=$(artifact_store_path "$expected")
+  write_artifact_validation "$manifest" "$index" "verified" "pass" "SHA-256 matched before quantization"
+
+  local quantized_root safe_id stage_root stage_output final_output
+  quantized_root="$REGISTRY_DIR/quantized"
+  mkdir -p "$quantized_root"
+  safe_id="${id//\//__}"
+  if [[ -z "$output" ]]; then
+    final_output="$quantized_root/$safe_id/$mode"
+  else
+    final_output="$output"
+  fi
+  mkdir -p "$(dirname "$final_output")"
+  [[ ! -e "$final_output" && ! -L "$final_output" ]] ||
+    die "Output already exists; refusing to overwrite: $final_output"
+
+  stage_root=$(mktemp -d "$(dirname "$final_output")/.quantize.XXXXXX")
+  stage_output="$stage_root/output"
+  log "Quantizing verified ONNX artifact $selected_id using $mode ..."
+  if ! python3 "$ROOT/tools/quantization/quantize_model.py" \
+      --model "$candidate" --output-dir "$stage_output" \
+      --model-id "$id" --artifact-id "$selected_id" --sha256 "$expected" \
+      --mode "$mode" --threshold-ratio "$threshold_ratio" --op-types "$op_types"; then
+    rm -rf -- "$stage_root"
+    die "Quantization failed; no final output was published"
+  fi
+  if ! mv -n -- "$stage_output" "$final_output"; then
+    rm -rf -- "$stage_root"
+    die "Could not publish quantized artifacts to $final_output"
+  fi
+  if [[ -e "$stage_output" ]]; then
+    rm -rf -- "$stage_root"
+    die "Output path appeared concurrently; staged quantization output was removed"
+  fi
+  rmdir "$stage_root" 2>/dev/null || true
+  ok "Quantized artifacts created for $id ($mode)"
+  printf '  Output: %s\n' "$final_output"
+  printf '  Manifest fragment: %s/derived-manifest.fragment.json\n' "$final_output"
+  audit_log "QUANTIZE id=$id artifact=$selected_id mode=$mode source_sha256=$expected output=$final_output"
 }
 
 cmd_prepare() {
-  local id="${1:-}"
-  [[ -n "$id" ]] || die "Usage: $PROG prepare <id> [--quant METHOD]"
-  ensure_registry
-  local path
-  path=$(manifest_path "$id")
-  [[ -f "$path" ]] || die "No manifest for id: $id"
+  local id="${1:-}" artifact_id="" output=""
+  [[ -n "$id" ]] || die "Usage: $PROG prepare <id> [--artifact ARTIFACT_ID] [--output DIR]"
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --artifact)
+        [[ $# -ge 2 && -n "$2" ]] || die "--artifact requires an artifact ID"
+        artifact_id="$2"; shift 2 ;;
+      --output)
+        [[ $# -ge 2 && -n "$2" ]] || die "--output requires a directory"
+        output="$2"; shift 2 ;;
+      --*)
+        die "Unknown prepare option: $1" ;;
+      *)
+        die "Unexpected prepare argument: $1" ;;
+    esac
+  done
 
-  echo "prepare: scaffold only (M3)"
-  echo "  Model: $id"
-  echo "  Intended behaviour: create derived (quantized/converted) artifacts"
-  echo "  with full provenance (parent hash, tool, parameters, output hash)."
-  echo "  Original artifacts are never overwritten."
-  audit_log "PREPARE id=$id status=scaffold"
+  validate_model_id "$id"
+  ensure_registry
+  require_json_tools
+  require_command python3
+  local manifest
+  manifest=$(manifest_path "$id")
+  [[ -f "$manifest" ]] || die "No manifest for model id: $id"
+  validate_manifest "$manifest"
+
+  local index
+  if ! index=$(jq -er --arg aid "$artifact_id" --arg use_aid "$([[ -n "$artifact_id" ]] && echo yes || echo no)" '
+    [.artifacts | to_entries[]
+      | select(((.value.format // "") | ascii_downcase) == "onnx"
+          or ((.value.filename // "") | ascii_downcase | endswith(".onnx")))
+      | select($use_aid == "no" or .value.id == $aid)]
+    | if length == 1 then .[0].key
+      elif length == 0 then error("no matching ONNX artifact found")
+      else error("multiple ONNX artifacts found; specify --artifact ARTIFACT_ID")
+      end
+  ' "$manifest" 2>/dev/null); then
+    die "Could not select exactly one ONNX artifact; specify --artifact if the manifest contains multiple ONNX files"
+  fi
+
+  local selected_id filename expected candidate actual
+  selected_id=$(jq -er ".artifacts[$index].id" "$manifest")
+  filename=$(jq -er ".artifacts[$index].filename" "$manifest")
+  expected=$(jq -er ".artifacts[$index].sha256" "$manifest")
+  validate_filename "$filename"
+  validate_sha256 "$expected"
+  expected=$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')
+  candidate=$(artifact_store_path "$expected")
+  if [[ ! -f "$candidate" ]]; then
+    if [[ -f "$ROOT/$filename" ]]; then
+      candidate="$ROOT/$filename"
+    else
+      die "ONNX artifact is not present locally; pull it first: $selected_id"
+    fi
+  fi
+
+  actual=$(sha256_file "$candidate")
+  if [[ "$actual" != "$expected" ]]; then
+    local qdest
+    mkdir -p "$QUARANTINE_DIR"
+    local qname
+    qname=$(printf '%s' "$selected_id" | tr -c 'A-Za-z0-9._-' '_')
+    qdest="$QUARANTINE_DIR/$qname.$actual.$(date +%s)"
+    cp -- "$candidate" "$qdest" || die "Could not quarantine mismatched ONNX artifact"
+    write_artifact_validation "$manifest" "$index" "quarantined" "fail" "expected $expected; got $actual"
+    die "ONNX artifact hash mismatch; quarantined copy: $qdest"
+  fi
+  store_artifact "$candidate" "$expected" >/dev/null
+  candidate=$(artifact_store_path "$expected")
+  write_artifact_validation "$manifest" "$index" "verified" "pass" "SHA-256 matched before ONNX preparation"
+
+  local prepared_root safe_id stage_root stage_patch final_output
+  prepared_root="$REGISTRY_DIR/prepared"
+  mkdir -p "$prepared_root"
+  safe_id="${id//\//__}"
+  if [[ -z "$output" ]]; then
+    final_output="$prepared_root/$safe_id"
+  else
+    final_output="$output"
+    mkdir -p "$(dirname "$final_output")"
+  fi
+  [[ ! -e "$final_output" && ! -L "$final_output" ]] ||
+    die "Output already exists; refusing to overwrite: $final_output"
+
+  stage_root=$(mktemp -d "$(dirname "$final_output")/.prepare.XXXXXX")
+  stage_patch="$stage_root/patch"
+  log "Preparing verified ONNX artifact $selected_id ..."
+  if ! python3 "$ROOT/tools/onnx/prepare_model.py" \
+      --model "$candidate" --output "$stage_patch" \
+      --model-id "$id" --artifact-id "$selected_id" --sha256 "$expected"; then
+    rm -rf -- "$stage_root"
+    die "ONNX-to-Cmajor preparation failed; no final output was published"
+  fi
+
+  if ! mv -n -- "$stage_patch" "$final_output"; then
+    rm -rf -- "$stage_root"
+    die "Could not publish prepared patch to $final_output"
+  fi
+  if [[ -e "$stage_patch" ]]; then
+    rm -rf -- "$stage_root"
+    die "Output path appeared concurrently; staged patch retained at $stage_patch"
+  fi
+  rmdir "$stage_root" 2>/dev/null || true
+  ok "Prepared Cmajor patch for $id"
+  printf '  Output: %s\n' "$final_output"
+  printf '  Provenance: %s/provenance.json\n' "$final_output"
+  audit_log "PREPARE id=$id artifact=$selected_id source_sha256=$expected output=$final_output"
 }
 
 cmd_deploy() {
   local id="${1:-}"
   [[ -n "$id" ]] || die "Usage: $PROG deploy <id>"
-  ensure_registry
-  local path
-  path=$(manifest_path "$id")
-  [[ -f "$path" ]] || die "No manifest for id: $id"
-
-  echo "deploy: scaffold only (M4)"
-  echo "  Model: $id"
-  echo "  Intended behaviour:"
-  echo "    - Require validation.status == verified"
-  echo "    - Launch configured backend (llama.cpp / ONNX Runtime) on loopback"
-  echo "    - Record deployment and health status"
-  echo "    - Support rollback to previous healthy deployment"
-  audit_log "DEPLOY id=$id status=scaffold"
+  [[ $# -eq 1 ]] || die "deploy does not accept additional arguments until M4 is implemented"
+  validate_model_id "$id"
+  die "deploy is not implemented yet (planned milestone M4); no service was started"
 }
 
 cmd_rollback() {
-  echo "rollback: scaffold only (M4)"
-  echo "  Intended behaviour: restore previously healthy deployment."
-  audit_log "ROLLBACK status=scaffold"
+  die "rollback is not implemented yet (planned milestone M4); no deployment was changed"
 }
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 main() {
   local cmd="${1:-help}"
   shift || true
-
   case "$cmd" in
-    help|-h|--help)     usage ;;
+    help|-h|--help) usage ;;
     version|-V|--version) cmd_version ;;
-    status)             cmd_status "$@" ;;
-    list)               cmd_list "$@" ;;
-    inspect)            cmd_inspect "$@" ;;
-    register)           cmd_register "$@" ;;
-    verify)             cmd_verify "$@" ;;
-    pull)               cmd_pull "$@" ;;
-    prepare)            cmd_prepare "$@" ;;
-    deploy)             cmd_deploy "$@" ;;
-    rollback)           cmd_rollback "$@" ;;
-    *)
-      err "Unknown command: $cmd"
-      echo "Run '$PROG help' for usage." >&2
-      exit 1
-      ;;
+    status) cmd_status "$@" ;;
+    list) cmd_list "$@" ;;
+    inspect) cmd_inspect "$@" ;;
+    register) cmd_register "$@" ;;
+    verify) cmd_verify "$@" ;;
+    pull) cmd_pull "$@" ;;
+    quantize) cmd_quantize "$@" ;;
+    prepare) cmd_prepare "$@" ;;
+    deploy) cmd_deploy "$@" ;;
+    rollback) cmd_rollback "$@" ;;
+    *) err "Unknown command: $cmd"; printf "Run '%s help' for usage.\n" "$PROG" >&2; exit 1 ;;
   esac
 }
 

@@ -23,6 +23,7 @@ A model is never considered verified solely because a file was downloaded.
 - Schema: `schemas/model-manifest.schema.json`
 - Encoding: UTF-8
 - Recommended filename: `model.manifest.json` (or `<model-id>.manifest.json`)
+- Registration validates against the JSON Schema using `check-jsonschema` and requires `jq`; validation fails closed when either tool or the schema is unavailable.
 
 ---
 
@@ -131,6 +132,28 @@ Each entry describes one concrete file (original weights, a specific quantizatio
 4. Changing any trust-relevant field (hashes, signatures, license, source) requires a new version or a new artifact entry.
 
 ---
+
+## Registry Implementation Boundaries
+
+The current M1/M2 CLI stores one immutable manifest per model ID. Registering the same ID again is rejected rather than silently replacing its manifest. Multiple concurrently registered versions for one model ID are planned work and are not yet supported. Artifact IDs must be unique within a manifest. Artifact filenames are basenames only; path separators are rejected.
+
+A SHA-256 match establishes byte identity against the digest in the manifest. It does not establish who published the artifact, whether the publisher is authentic, whether redistribution is licensed, or whether the model is safe. Signature verification and trusted-key management are not implemented.
+
+## ONNX quantization and preparation semantics
+
+An artifact with format "onnx" can be selected by the quantize or prepare command. Quantize supports FP16 weight conversion, ONNX Runtime dynamic INT8 weight quantization for selected operator types, and packed 2-bit ternary sidecars with per-output-channel scales. Ternary mode also writes an ONNX model with reconstructed floating-point weights for standard ONNX Runtime execution; this is not native ternary arithmetic.
+
+Quantize rechecks the source digest and writes provenance.json plus derived-manifest.fragment.json. The registered source manifest is not modified. The fragment records the derived ONNX artifact and any ternary sidecar files; an operator should create a separately versioned manifest before registering derived outputs.
+
+An artifact with format "onnx" can also be selected by the prepare command. The CLI requires exactly one matching artifact unless --artifact ARTIFACT_ID is supplied, rechecks the artifact SHA-256, and requires a self-contained ONNX file (external tensor-data paths are refused).
+
+The current Cmajor preparation path supports only the explicit fallback contracts documented in tools/onnx/README.md:
+
+- FLOAT16 initializers are promoted to FLOAT32.
+- Signed INT8 initializers are folded only through initializer-backed DequantizeLinear nodes with explicit scale and optional zero-point.
+- Packed ternary UINT8 initializers are decoded only with the cmajor.ternary.<initializer-name> metadata contract.
+
+These conversions expand weights to FLOAT32 Cmajor constants. They do not preserve packed quantized storage, implement GGUF Q4/Q5 quantization, or prove Cmajor compilation / ONNX Runtime parity. Unsupported ONNX operators and known Cmajor template stubs are rejected. Each prepared patch contains provenance.json with the source artifact digest and hashes of generated files.
 
 ## Validation States
 

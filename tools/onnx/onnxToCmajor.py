@@ -1,0 +1,925 @@
+#!/usr/bin/env python3
+
+#
+#     ,ad888ba,                              88
+#    d8"'    "8b
+#   d8            88,dba,,adba,   ,aPP8A.A8  88     The Cmajor Toolkit
+#   Y8,           88    88    88  88     88  88
+#    Y8a.   .a8P  88    88    88  88,   ,88  88     (C)2024 Cmajor Software Ltd
+#     '"Y888Y"'   88    88    88  '"8bbP"Y8  88
+#                                           ,88
+#                                        888P"
+#
+#  The Cmajor project is subject to commercial or open-source licensing.
+#  You may use it under the terms of the GPLv3 (see www.gnu.org/licenses), or
+#  visit https://cmajor.dev to learn about our commercial licence options.
+#
+#  CMAJOR IS PROVIDED "AS IS" WITHOUT ANY WARRANTY, AND ALL WARRANTIES, WHETHER
+#  EXPRESSED OR IMPLIED, INCLUDING MERCHANTABILITY AND FITNESS FOR PURPOSE, ARE
+#  DISCLAIMED.
+
+import sys, shutil, os, getopt, onnx, json
+from pathlib import Path
+import numpy as np
+from onnx import numpy_helper, shape_inference
+
+# Reuse the repository's audited numeric transforms. This script remains
+# executable from any working directory inside a checkout.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_REPO_ROOT / "src"))
+try:
+    from schema_review.fallback_runtime import (
+        FallbackError, promote_float16, dequantize_int8, decode_ternary,
+    )
+except ImportError as exc:
+    raise RuntimeError(
+        "schema_review fallback runtime is required; run from a complete schema checkout"
+    ) from exc
+
+patchTemplateDir = os.path.dirname(os.path.abspath(sys.argv[0])) + "/patchTemplate"
+
+dimParamFrames = 1
+endpointSuffix = "_Transformer"
+
+ioBlock = []
+nodes = []
+connections = []
+initialisers = []
+endpoints = {}
+connectionDataTypes = {}
+outputNames = []
+
+nodeEndpointNames = {
+    "Tanh" :        [["in"],                                                                                    ["out"]],
+    "Reshape" :     [["in", ""],                                                                                ["out"]],
+    "MatMul" :      [["in", "mul"],                                                                             ["out"]],
+    "Gemm" :        [["in", "mul", "add"],                                                                      ["out"]],
+    "Add" :         [["inA", "inB"],                                                                            ["out"]],
+    "Unsqueeze" :   [["in", ""],                                                                                ["out"]],
+    "Squeeze" :     [["in", ""],                                                                                ["out"]],
+    "Conv" :        [["in", "inWeights"],                                                                       ["out"]],
+    "GRU" :         [["in", "inWVals", "inRVals", "inBVals", "seq", "inInitial"],                               ["out"]],
+    "Pad" :         [["in", "pads"],                                                                            ["out"]],
+    "Transpose" :   [["in"],                                                                                    ["out"]],
+    "Constant":     [[],                                                                                        ["out"]],
+    "LSTM":         [["inX", "inW", "inR", "inB", "inSequenceLens", "initialH", "initialC", "inP"],             ["outY", "outY_h", "outY_c"]],
+    "Slice" :       [["data", "starts", "ends", "axes", "steps"],                                               ["out"]],
+    "Gather" :      [["in", "indices"],                                                                         ["out"]],
+    "Concat" :      [["in1", "in2", "in3"],                                                                     ["out"]],
+}
+
+def getConnectionDataType (name):
+
+    if name in connectionDataTypes:
+        return connectionDataTypes[name][0]
+
+    assert (False)
+
+def getConnectionDataTypeDimensions (name):
+    if name in connectionDataTypes:
+        return connectionDataTypes[name][1]
+
+    assert (False)
+
+def getConnectionDataTypeTotalElements (name):
+    if name in connectionDataTypes:
+        return connectionDataTypes[name][2]
+
+    assert (False)
+
+def getDataType (dataType: int):
+
+    dataTypes = {
+        onnx.TensorProto.FLOAT:     ["float32", "f"],
+        onnx.TensorProto.DOUBLE:    ["float64", ""],
+        onnx.TensorProto.INT64:     ["int64",   "i64"],
+        onnx.TensorProto.INT32:     ["int32",   ""],
+        onnx.TensorProto.BOOL:      ["bool",    ""]
+    }
+
+    if dataType in dataTypes:
+        return dataTypes[dataType]
+
+    raise ValueError(f"unsupported ONNX tensor data type: {dataType}")
+
+def createCmajArray (dimensions, array, elementSuffix):
+
+    if len(dimensions) == 0:
+        return str (array) + elementSuffix
+
+    if len(dimensions) == 1:
+        items = []
+
+        for i in array.tolist():
+            items.append (str (i) + elementSuffix)
+
+        return "(" + ", ".join (items) + ")"
+
+    items = []
+    innerDims = dimensions[1:]
+
+    for i in range (dimensions[0]):
+        items.append (createCmajArray (innerDims, array[i], elementSuffix))
+
+    return "(" + ", ".join (items) + ")"
+
+def getEndpointInputName (opType, id):
+    if opType in nodeEndpointNames:
+        nodeEndpointInputNameList = nodeEndpointNames[opType][0]
+        if id < len (nodeEndpointInputNameList):
+            return nodeEndpointInputNameList[id]
+
+    return "in" + str (id)
+
+def getEndpointOutputName (opType, id):
+    if opType in nodeEndpointNames:
+        nodeEndpointInputNameList = nodeEndpointNames[opType][1]
+        if id < len (nodeEndpointInputNameList):
+            return nodeEndpointInputNameList[id]
+
+    return "out" + str (id)
+
+def sanitiseName (s):
+    return s.replace('/','_').replace(":", "_").replace(".", "_").lstrip ("_")
+
+def populateNodeOutputs (model: onnx.ModelProto):
+    for op in model.graph.node:
+        nodeName = sanitiseName (op.name)
+        for index, outputName in enumerate (op.output):
+            endpoints[sanitiseName (outputName)] = nodeName + "." + getEndpointOutputName (op.op_type, index)
+
+    initialisers = []
+
+    for initialiser in model.graph.initializer:
+        initialisers.append (initialiser.name)
+        endpoints[sanitiseName (initialiser.name)] = sanitiseName (initialiser.name) + ".out"
+        addInitialiser (initialiser)
+
+    for input in model.graph.input:
+        if input.name not in initialisers:
+            endpoints[sanitiseName (input.name)] = sanitiseName (input.name) + endpointSuffix
+
+    for output in model.graph.output:
+        endpoints[sanitiseName (output.name)] = sanitiseName (output.name)
+
+def addInitialiser (initialiser):
+    nodeName = sanitiseName (initialiser.name)
+    nodes.append ("        " + nodeName + " = onnx::operation::Constant (" + nodeName + "_.type, " + nodeName + "_);")
+
+    dimensions = ','.join(map(str, initialiser.dims))
+    dataType, elementSuffix = getDataType (initialiser.data_type)
+    array = numpy_helper.to_array(initialiser)
+    dataArray = str(createCmajArray (initialiser.dims, array, elementSuffix)).replace ('[','(').replace(']',')')
+    initialisers.append ("    let " + nodeName + "_ = " + dataType + "[" + dimensions + "] " + dataArray + ";")
+
+def createConstantValue (constantName, attribute):
+
+    dataType, elementSuffix = getDataType (attribute.t.data_type)
+    dimensions = ','.join(map(str, attribute.t.dims))
+    array = numpy_helper.to_array(attribute.t)
+    dataArray = str(createCmajArray (attribute.t.dims, array, elementSuffix)).replace ('[','(').replace(']',')')
+
+    if len (dimensions) == 0:
+        initialisers.append ("    let " + constantName + "_ = " + dataType + " (" + dataArray + ");")
+    else:
+        initialisers.append ("    let " + constantName + "_ = " + dataType + "[" + dimensions + "] " + dataArray + ";")
+
+    return constantName + "_"
+
+def getNodeAttribute (op: onnx.NodeProto, name):
+    for attribute in op.attribute:
+        if attribute.name == name:
+            return attribute
+
+def getNodeAttributeValue (op: onnx.NodeProto, name):
+
+    for attribute in op.attribute:
+        if attribute.name == name:
+            if attribute.type == onnx.AttributeProto.INT:
+                return str (attribute.i)
+
+            if attribute.type == onnx.AttributeProto.INTS:
+
+                intList = []
+                for i in attribute.ints:
+                    intList.append (i)
+
+                return "int[" + str (len (intList)) + "] (" + ", ".join(map(str, intList)) + ")"
+
+def getOperatorParameters (op: onnx.NodeProto):
+    outputDataType = getConnectionDataType (op.output[0])
+
+    if op.op_type == "Constant":
+        constantName = createConstantValue (sanitiseName (op.name), getNodeAttribute (op, "value"))
+        return " (" + outputDataType + ", " + constantName + ")"
+
+    inputDataType = getConnectionDataType (op.input[0])
+
+    if op.op_type == "Add":
+        return " (" + inputDataType + ")"
+    if op.op_type == "Tanh":
+        return " (" + inputDataType + ")"
+
+    if op.op_type == "Conv":
+        dilations = getNodeAttributeValue (op, "dilations")
+        kernelShape = getNodeAttributeValue (op, "kernel_shape")
+        if kernelShape is None:
+            raise ValueError(f"{op.name or 'Conv'}: kernel_shape could not be inferred; explicit kernel_shape is required")
+        if dilations is None:
+            dilations = "int[2] (1, 1)"
+        return " (" + inputDataType + ", " + outputDataType + ", " + str (kernelShape) + ", " + str (dilations) + ")"
+
+    if op.op_type == "LSTM":
+        hiddenSize = getNodeAttributeValue (op, "hidden_size")
+        return " (" + inputDataType + ", " + outputDataType + ", " + str (hiddenSize) + ")"
+
+    if op.op_type == "Transpose":
+        perm = getNodeAttributeValue (op, "perm")
+        if perm is None:
+            rank = getConnectionDataTypeDimensions (op.input[0])
+            reversed_axes = ", ".join(str(i) for i in reversed(range(rank)))
+            perm = "int[" + str(rank) + "] (" + reversed_axes + ")"
+        totalElements = getConnectionDataTypeTotalElements (op.input[0])
+        return " (" + inputDataType + ", " + outputDataType + ", " + str (totalElements) + ", " + perm + ")"
+
+    if op.op_type == "MatMul":
+        mulType = getConnectionDataType (op.input[1])
+        return " (" + inputDataType + ", " + outputDataType + ", " + mulType + ")"
+
+    if op.op_type == "Gemm":
+        mulType = getConnectionDataType (op.input[1])
+        return " (" + inputDataType + ", " + outputDataType + ", " + mulType + ")"
+
+    if op.op_type == "Slice":
+        axesType = "int[" + str (getConnectionDataTypeDimensions (op.input[0])) + "]"
+
+        if (op.input[3]):
+            axesType = getConnectionDataType (op.input[3])
+
+        return " (" + inputDataType + ", " + outputDataType + ", " + axesType + ")"
+
+    if op.op_type == "Gather":
+        indicesType = getConnectionDataType (op.input[1])
+        return " (" + inputDataType + ", " + outputDataType + ", " + indicesType + ")"
+
+    if op.op_type == "Concat":
+        axisValue = getNodeAttributeValue (op, "axis")
+        return " (" + inputDataType + ", " + outputDataType + ", " + "3" + ", " + axisValue + ")"
+
+    return " (" + inputDataType + ", " + outputDataType + ")"
+
+def generateNode (op: onnx.NodeProto):
+    global nodes
+    global connections
+
+    nodeName = sanitiseName (op.name)
+    opType   = op.op_type
+    nodes.append ("        " + nodeName + " = onnx::operation::" + opType + getOperatorParameters (op) + ";")
+
+    for index, input in enumerate (op.input):
+        if input != "":
+            inputEndpoint = getEndpointInputName (opType, index)
+            if inputEndpoint != "":
+                connections.append ("        " + endpoints[sanitiseName (input)] + " -> " + nodeName + "." + inputEndpoint + ";")
+
+    for index, output in enumerate (op.output):
+        if output in outputNames:
+            outputEndpoint = getEndpointOutputName (opType, index)
+            connections.append ("        " + nodeName + "." + outputEndpoint + " -> " + output + endpointSuffix + ";")
+
+def parseInitialiserType (initialiser):
+        dataType, elementSuffix = getDataType (initialiser.data_type)
+        dimensions = []
+        totalElements = 1
+        for dim in initialiser.dims:
+            dimensions.append (dim)
+            totalElements *= dim
+
+        if len (dimensions) == 0:
+            return dataType, 0, 1
+
+        dimensionList = ','.join(map(str, dimensions))
+
+        return dataType + "[" + dimensionList + "]", len (dimensions), totalElements
+
+def parseTensorType (tensorType):
+        dataType, elementSuffix = getDataType (tensorType.elem_type)
+        dimensions = []
+        totalElements = 1
+
+        for dim in tensorType.shape.dim:
+            if dim.dim_value:
+                dimensions.append (dim.dim_value)
+                totalElements *= dim.dim_value
+            elif dim.dim_param:
+                dimensions.append (dimParamFrames)
+                totalElements *= dimParamFrames
+
+        if len (dimensions) == 0:
+            return dataType, 0, 1
+
+        dimensionList = ','.join(map(str, dimensions))
+
+        return dataType + "[" + dimensionList + "]", len (dimensions), totalElements
+
+def parseTensorTypeToStreamType (tensorType):
+        dataType, elementSuffix = getDataType (tensorType.elem_type)
+        elements = 1
+
+        for dim in tensorType.shape.dim:
+            if dim.dim_value:
+                elements *= dim.dim_value
+            elif dim.dim_param:
+                elements *= dimParamFrames
+
+        return dataType + "<" + str (elements) + ">"
+
+def populateDataTypes (model: onnx.ModelProto):
+
+    for input in model.graph.input:
+        connectionDataTypes[input.name] = parseTensorType (input.type.tensor_type)
+
+    for output in model.graph.output:
+        connectionDataTypes[output.name] = parseTensorType (output.type.tensor_type)
+
+    for valueInfo in model.graph.value_info:
+        name = valueInfo.name
+        connectionDataTypes[name] = parseTensorType (valueInfo.type.tensor_type)
+
+    for initialiser in model.graph.initializer:
+        name = initialiser.name
+        connectionDataTypes[name] = parseInitialiserType (initialiser)
+
+
+def populateIO (model: onnx.ModelProto):
+    global ioBlock
+    global nodes
+    global connections
+    global outputNames
+
+    initialisers = []
+
+    for initialiser in model.graph.initializer:
+        initialisers.append (initialiser.name)
+
+    for input in model.graph.input:
+        if input.name not in initialisers:
+            streamType = parseTensorTypeToStreamType (input.type.tensor_type)
+            tensorType = getConnectionDataType (input.name)
+
+            ioBlock.append ("    input stream " + streamType + " " + input.name + ";")
+            nodes.append ("        " + input.name + endpointSuffix + " = onnx::graphIn (" + streamType + ", " + tensorType + ");")
+            connections.append ("        " + input.name + " -> " + input.name + endpointSuffix + ";")
+
+    for output in model.graph.output:
+        outputNames.append (output.name)
+        streamType = parseTensorTypeToStreamType (output.type.tensor_type)
+        tensorType = getConnectionDataType (output.name)
+
+        ioBlock.append ("    output stream " + streamType + " " + output.name + ";")
+        nodes.append ("        " + output.name + endpointSuffix + " = onnx::graphOut (" + tensorType + ", " + streamType + ");")
+        connections.append ("        " + output.name + endpointSuffix + " -> " + output.name + ";")
+
+    connections.append ("")
+
+def populateMissingNodeNames (model: onnx.ModelProto):
+    # ONNX node names are optional. Generate deterministic names without
+    # colliding with names already supplied by the model author.
+    used_names = {node.name for node in model.graph.node if node.name}
+    next_node = 1
+
+    for node in model.graph.node:
+        if node.name == "":
+            while "node_" + str(next_node) in used_names:
+                next_node += 1
+            node.name = "node_" + str(next_node)
+            used_names.add(node.name)
+            next_node += 1
+
+def generateNodesAndConnections (model: onnx.ModelProto):
+    populateMissingNodeNames (model)
+    populateDataTypes (model)
+    populateIO (model)
+    populateNodeOutputs (model)
+
+    for op in enumerate (model.graph.node):
+        generateNode (op[1])
+
+
+def printCmajor (patchDir):
+
+    with open (patchTemplateDir + "/model.cmajor", "r") as f:
+        mainGraphBody = f.read()
+
+    cmaj = mainGraphBody.replace("NODES", "\n".join (nodes)) \
+                        .replace("IOBLOCK", "\n".join (ioBlock)) \
+                        .replace("CONNECTIONS", "\n".join (connections)) \
+                        .replace("INITIALISERS", "\n".join (initialisers))
+
+    if patchDir == None:
+        print (cmaj)
+    else:
+
+        if os.path.exists (patchDir):
+            raise FileExistsError ("refusing to overwrite existing Cmajor patch directory: " + patchDir)
+        shutil.copytree (patchTemplateDir, patchDir)
+
+        f = open (patchDir + "/model.cmajor", "w")
+        f.write (cmaj)
+        print ("Cmajor patch created: " + patchDir + "/model.cmajor")
+        f.close()
+
+def usage():
+    print (
+"""
+
+  This script generates Cmajor code from an ONNX model.
+
+  Options:
+    -h                   Display this help
+    --model <file>       Specifies the ONNX model file to convert
+    --patchDir <folder>  Specifies a folder into which the generated patch will be written
+
+  If no patchDir argument is supplied, the output will be a single Cmajor file.
+
+""")
+
+def _tensor_shape(tensor):
+    return [int(d) for d in tensor.dims]
+
+
+def _replace_initializer(graph, name, values, shape):
+    """Replace one initializer with finite FLOAT32 values and its logical shape."""
+    array = np.asarray(values, dtype=np.float32).reshape(tuple(shape))
+    if not np.isfinite(array).all():
+        raise ValueError(f"{name}: decoded initializer contains NaN or infinity")
+    replacement = numpy_helper.from_array(array, name=name)
+    for index, item in enumerate(graph.initializer):
+        if item.name == name:
+            graph.initializer[index].CopyFrom(replacement)
+            return
+    raise ValueError(f"{name}: initializer disappeared during conversion")
+
+
+def _model_metadata(model):
+    result = {}
+    for item in model.metadata_props:
+        if item.key in result:
+            raise ValueError(f"duplicate model metadata key: {item.key}")
+        result[item.key] = item.value
+    return result
+
+
+def _decode_ternary_initializers(model):
+    """Decode only explicitly annotated UINT8 two-bit packed initializers.
+
+    Metadata key: cmajor.ternary.<initializer-name>
+    Value JSON: {"encoding":"2bit-packed-v1","shape":[...],
+                 "bit_order":"lsb|msb","codebook":{"0":...,"1":...,"2":...}}
+    """
+    metadata = _model_metadata(model)
+    prefix = "cmajor.ternary."
+    annotated = {key[len(prefix):]: value for key, value in metadata.items()
+                 if key.startswith(prefix)}
+    initializer_by_name = {item.name: item for item in model.graph.initializer}
+    for name, raw_contract in annotated.items():
+        if name not in initializer_by_name:
+            raise ValueError(f"ternary metadata references missing initializer: {name}")
+        tensor = initializer_by_name[name]
+        if tensor.data_type != onnx.TensorProto.UINT8:
+            raise ValueError(f"{name}: ternary packed initializer must be UINT8")
+        try:
+            contract = json.loads(raw_contract)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"{name}: malformed ternary metadata JSON") from exc
+        required = {"encoding", "shape", "bit_order", "codebook"}
+        if not isinstance(contract, dict) or set(contract) != required:
+            raise ValueError(f"{name}: ternary metadata must contain exactly {sorted(required)}")
+        if contract["encoding"] != "2bit-packed-v1":
+            raise ValueError(f"{name}: unsupported ternary encoding")
+        shape = contract["shape"]
+        if (not isinstance(shape, list) or not shape
+                or any(type(d) is not int or d <= 0 for d in shape)):
+            raise ValueError(f"{name}: ternary logical shape must contain positive integers")
+        codebook_raw = contract["codebook"]
+        if not isinstance(codebook_raw, dict) or set(codebook_raw) != {"0", "1", "2"}:
+            raise ValueError(f"{name}: ternary codebook must explicitly define codes 0, 1, and 2")
+        codebook = {int(key): value for key, value in codebook_raw.items()}
+        packed = numpy_helper.to_array(tensor).reshape(-1).tolist()
+        try:
+            decoded = decode_ternary(
+                packed, values_count=int(np.prod(shape)), shape=shape,
+                codebook=codebook, bit_order=contract["bit_order"],
+            )
+        except (FallbackError, TypeError, ValueError) as exc:
+            raise ValueError(f"{name}: ternary decode rejected: {exc}") from exc
+        _replace_initializer(model.graph, name, decoded, shape)
+
+
+def _dequantize_int8_initializers(model):
+    """Fold initializer-backed ONNX DequantizeLinear nodes into FLOAT32 weights."""
+    graph = model.graph
+    initializer_by_name = {item.name: item for item in graph.initializer}
+    dq_nodes = [node for node in graph.node if node.op_type == "DequantizeLinear"]
+    if not dq_nodes:
+        # INT8 tensors without a declared DequantizeLinear contract are ambiguous.
+        int8_names = [t.name for t in graph.initializer
+                      if t.data_type == onnx.TensorProto.INT8]
+        if int8_names:
+            raise ValueError("INT8 initializers require an explicit DequantizeLinear node: "
+                             + ", ".join(int8_names))
+        return
+
+    parameter_names = set()
+    plans = []
+    for node in dq_nodes:
+        if len(node.input) < 2 or len(node.input) > 3 or len(node.output) != 1:
+            raise ValueError(f"{node.name or 'DequantizeLinear'}: unsupported input/output arity")
+        attributes = {item.name: onnx.helper.get_attribute_value(item) for item in node.attribute}
+        if "block_size" in attributes:
+            raise ValueError(f"{node.name or 'DequantizeLinear'}: blocked INT8 quantization is not supported by this fallback")
+        if ("output_dtype" in attributes
+                and attributes["output_dtype"] != onnx.TensorProto.FLOAT):
+            raise ValueError(f"{node.name or 'DequantizeLinear'}: only FLOAT32 DequantizeLinear output is supported")
+        data_name, scale_name = node.input[0], node.input[1]
+        zero_name = node.input[2] if len(node.input) == 3 and node.input[2] else None
+        if data_name not in initializer_by_name:
+            raise ValueError(f"{node.name or 'DequantizeLinear'}: data input must be an initializer")
+        if scale_name not in initializer_by_name:
+            raise ValueError(f"{node.name or 'DequantizeLinear'}: scale must be an initializer")
+        graph_input_names = {item.name for item in graph.input}
+        if scale_name in graph_input_names:
+            raise ValueError(f"{scale_name}: dynamic scale graph inputs are not supported")
+        if zero_name is not None and zero_name in graph_input_names:
+            raise ValueError(f"{zero_name}: dynamic zero-point graph inputs are not supported")
+        data_tensor = initializer_by_name[data_name]
+        if data_tensor.data_type != onnx.TensorProto.INT8:
+            raise ValueError(f"{data_name}: this fallback supports signed INT8 data only")
+        scale_array = numpy_helper.to_array(initializer_by_name[scale_name])
+        if scale_array.ndim > 1:
+            raise ValueError(f"{scale_name}: scale must be scalar or one-dimensional")
+        if zero_name is None:
+            zero_array = np.asarray(0, dtype=np.int8)
+        else:
+            if zero_name not in initializer_by_name:
+                raise ValueError(f"{node.name or 'DequantizeLinear'}: zero point must be an initializer")
+            zero_tensor = initializer_by_name[zero_name]
+            if zero_tensor.data_type != onnx.TensorProto.INT8:
+                raise ValueError(f"{zero_name}: zero point must be signed INT8")
+            zero_array = numpy_helper.to_array(zero_tensor)
+            if zero_array.ndim > 1:
+                raise ValueError(f"{zero_name}: zero point must be scalar or one-dimensional")
+        axis = None
+        if scale_array.ndim == 1 and scale_array.size > 1:
+            axis_attr = next((a for a in node.attribute if a.name == "axis"), None)
+            axis = int(axis_attr.i) if axis_attr is not None else 1
+        shape = _tensor_shape(data_tensor)
+        transform_shape = shape if shape else [1]
+        try:
+            values = dequantize_int8(
+                numpy_helper.to_array(data_tensor).reshape(-1).tolist(),
+                transform_shape, scale=scale_array.reshape(-1).tolist()[0]
+                    if scale_array.size == 1 else scale_array.reshape(-1).tolist(),
+                zero_point=zero_array.reshape(-1).tolist()[0]
+                    if zero_array.size == 1 else zero_array.reshape(-1).tolist(),
+                axis=axis,
+            )
+        except (FallbackError, TypeError, ValueError) as exc:
+            raise ValueError(f"{data_name}: INT8 dequantization rejected: {exc}") from exc
+        plans.append((node, data_name, node.output[0], values, shape))
+        parameter_names.add(scale_name)
+        if zero_name:
+            parameter_names.add(zero_name)
+
+    # A quantized initializer may not also feed an ordinary operator directly.
+    dq_data_names = {plan[1] for plan in plans}
+    if len(dq_data_names) != len(plans):
+        raise ValueError("an INT8 initializer may have only one DequantizeLinear consumer")
+    graph_input_names = {item.name for item in graph.input}
+    graph_output_names = {item.name for item in graph.output}
+    for data_name in dq_data_names:
+        if data_name in graph_input_names or data_name in graph_output_names:
+            raise ValueError(f"{data_name}: quantized graph inputs/outputs require an explicit runtime adapter")
+    for node in graph.node:
+        if node.op_type == "DequantizeLinear":
+            continue
+        for input_name in node.input:
+            if input_name in dq_data_names:
+                raise ValueError(f"{input_name}: INT8 initializer has a non-DequantizeLinear consumer")
+
+    # Replace every DQ output use with the decoded FLOAT32 initializer name.
+    aliases = {output_name: data_name for _, data_name, output_name, _, _ in plans}
+    for node in graph.node:
+        if node.op_type == "DequantizeLinear":
+            continue
+        for index, input_name in enumerate(node.input):
+            if input_name in aliases:
+                node.input[index] = aliases[input_name]
+    for output in graph.output:
+        if output.name in aliases:
+            output.name = aliases[output.name]
+            output.type.tensor_type.elem_type = onnx.TensorProto.FLOAT
+    for value_info in list(graph.value_info):
+        if value_info.name in aliases:
+            value_info.name = aliases[value_info.name]
+        if value_info.name in dq_data_names:
+            value_info.type.tensor_type.elem_type = onnx.TensorProto.FLOAT
+
+    for _, data_name, _, values, shape in plans:
+        _replace_initializer(graph, data_name, values, shape)
+
+    kept_nodes = [node for node in graph.node if node.op_type != "DequantizeLinear"]
+    del graph.node[:]
+    graph.node.extend(kept_nodes)
+
+    # Remove quantization parameter initializers only when no remaining node uses them.
+    used = {name for node in graph.node for name in node.input if name}
+    kept_initializers = [
+        tensor for tensor in graph.initializer
+        if tensor.name not in parameter_names or tensor.name in used
+    ]
+    del graph.initializer[:]
+    graph.initializer.extend(kept_initializers)
+
+
+def _promote_float16_tensors(model):
+    """Promote FLOAT16 initializers and tensor value declarations to FLOAT32."""
+    for tensor in model.graph.initializer:
+        if tensor.data_type == onnx.TensorProto.FLOAT16:
+            array = numpy_helper.to_array(tensor)
+            words = array.view(np.uint16).reshape(-1).tolist()
+            shape = _tensor_shape(tensor)
+            transform_shape = shape if shape else [1]
+            try:
+                values = promote_float16(words, transform_shape)
+            except (FallbackError, TypeError, ValueError) as exc:
+                raise ValueError(f"{tensor.name}: FLOAT16 promotion rejected: {exc}") from exc
+            _replace_initializer(model.graph, tensor.name, values, shape)
+
+    for node in model.graph.node:
+        for attribute in node.attribute:
+            if attribute.type == onnx.AttributeProto.TENSOR and attribute.t.data_type == onnx.TensorProto.FLOAT16:
+                array = numpy_helper.to_array(attribute.t)
+                words = array.view(np.uint16).reshape(-1).tolist()
+                shape = _tensor_shape(attribute.t)
+                transform_shape = shape if shape else [1]
+                try:
+                    values = promote_float16(words, transform_shape)
+                except (FallbackError, TypeError, ValueError) as exc:
+                    raise ValueError(f"{node.name}: FLOAT16 Constant promotion rejected: {exc}") from exc
+                replacement = numpy_helper.from_array(                    np.asarray(values, dtype=np.float32).reshape(tuple(shape)),
+                    name=attribute.t.name,
+                )
+                attribute.t.CopyFrom(replacement)
+
+    # A graph boundary needs an explicit input/output cast, not just a changed
+    # type declaration. This emitter has no such adapter, so reject it.
+    for value_info in list(model.graph.input) + list(model.graph.output):
+        if value_info.type.tensor_type.elem_type == onnx.TensorProto.FLOAT16:
+            raise ValueError(
+                f"{value_info.name}: FLOAT16 graph I/O requires an explicit runtime cast adapter"
+            )
+    for value_info in model.graph.value_info:
+        if value_info.type.tensor_type.elem_type == onnx.TensorProto.FLOAT16:
+            value_info.type.tensor_type.elem_type = onnx.TensorProto.FLOAT
+
+
+def validate_cmajor_operator_contracts(model):
+    """Reject valid ONNX graphs that exceed the bundled Cmajor template semantics."""
+    shapes = {}
+    element_types = {}
+
+    for value in list(model.graph.input) + list(model.graph.output) + list(model.graph.value_info):
+        if value.type.HasField("tensor_type"):
+            tensor_type = value.type.tensor_type
+            element_types[value.name] = tensor_type.elem_type
+            if tensor_type.HasField("shape"):
+                shapes[value.name] = [
+                    dim.dim_value if dim.HasField("dim_value") and dim.dim_value > 0 else None
+                    for dim in tensor_type.shape.dim
+                ]
+
+    for tensor in model.graph.initializer:
+        shapes[tensor.name] = list(tensor.dims)
+        element_types[tensor.name] = tensor.data_type
+
+    for node in model.graph.node:
+        attrs = {
+            item.name: onnx.helper.get_attribute_value(item)
+            for item in node.attribute
+        }
+
+        if node.op_type == "Transpose":
+            if element_types.get(node.input[0]) != onnx.TensorProto.FLOAT:
+                raise ValueError(
+                    f"{node.name or 'Transpose'}: bundled Cmajor Transpose uses FLOAT32 storage only"
+                )
+
+        if node.op_type == "Gemm":
+            if (
+                float(attrs.get("alpha", 1.0)) != 1.0
+                or float(attrs.get("beta", 1.0)) != 1.0
+                or int(attrs.get("transA", 0)) != 0
+                or int(attrs.get("transB", 0)) != 0
+            ):
+                raise ValueError(
+                    f"{node.name or 'Gemm'}: bundled Cmajor Gemm supports only alpha=beta=1 and transA=transB=0"
+                )
+        if node.op_type != "Conv":
+            continue
+
+        if len(node.input) > 2 and node.input[2]:
+            raise ValueError(
+                f"{node.name or 'Conv'}: bundled Cmajor Conv does not implement the optional bias input"
+            )
+
+        input_shape = shapes.get(node.input[0])
+        weight_shape = shapes.get(node.input[1])
+        output_shape = shapes.get(node.output[0])
+        if not input_shape or not weight_shape or not output_shape:
+            raise ValueError(
+                f"{node.name or 'Conv'}: input, weight, and output shapes must be available after ONNX shape inference"
+            )
+        if len(input_shape) != 4 or len(weight_shape) != 4 or len(output_shape) != 4:
+            raise ValueError(
+                f"{node.name or 'Conv'}: bundled Cmajor Conv requires rank-4 input, weights, and output"
+            )
+        if any(element_types.get(name) != onnx.TensorProto.FLOAT for name in (node.input[0], node.input[1], node.output[0])):
+            raise ValueError(
+                f"{node.name or 'Conv'}: bundled Cmajor Conv supports FLOAT32 input, weights, and output only"
+            )
+
+        required_dims = (
+            input_shape[1], input_shape[2], input_shape[3],
+            weight_shape[0], weight_shape[1], weight_shape[2], weight_shape[3],
+            output_shape[1], output_shape[2], output_shape[3],
+        )
+        if any(value is None for value in required_dims):
+            raise ValueError(
+                f"{node.name or 'Conv'}: channel and spatial dimensions must be static"
+            )
+        if input_shape[2] != 1 or weight_shape[2] != 1 or output_shape[2] != 1:
+            raise ValueError(
+                f"{node.name or 'Conv'}: bundled Cmajor Conv only supports height=1 (1-D convolution)"
+            )
+        if input_shape[1] != weight_shape[1] or output_shape[1] != weight_shape[0]:
+            raise ValueError(
+                f"{node.name or 'Conv'}: channel dimensions do not match the bundled Cmajor Conv contract"
+            )
+
+        kernel = list(attrs.get("kernel_shape", weight_shape[2:]))
+        if kernel != weight_shape[2:]:
+            raise ValueError(
+                f"{node.name or 'Conv'}: kernel_shape must match the initializer spatial dimensions"
+            )
+        if "kernel_shape" not in attrs:
+            node.attribute.append(onnx.helper.make_attribute("kernel_shape", kernel))
+
+        dilations = list(attrs.get("dilations", [1, 1]))
+        strides = list(attrs.get("strides", [1, 1]))
+        pads = list(attrs.get("pads", [0, 0, 0, 0]))
+        group = int(attrs.get("group", 1))
+        auto_pad = attrs.get("auto_pad", b"NOTSET")
+        if isinstance(auto_pad, bytes):
+            auto_pad = auto_pad.decode("ascii", errors="strict")
+        if len(kernel) != 2 or len(dilations) != 2 or dilations[0] != 1 or dilations[1] < 1:
+            raise ValueError(f"{node.name or 'Conv'}: unsupported kernel/dilation configuration")
+        if strides != [1, 1] or pads != [0, 0, 0, 0] or group != 1 or auto_pad not in ("NOTSET", "VALID"):
+            raise ValueError(
+                f"{node.name or 'Conv'}: bundled Cmajor Conv requires stride=1, zero padding, group=1, and auto_pad NOTSET/VALID"
+            )
+
+        expected_width = input_shape[3] - dilations[1] * (kernel[1] - 1)
+        if expected_width < 1 or output_shape[3] != expected_width:
+            raise ValueError(
+                f"{node.name or 'Conv'}: output width does not match valid, stride-1 convolution geometry"
+            )
+        if input_shape[0] is not None and output_shape[0] is not None and input_shape[0] != output_shape[0]:
+            raise ValueError(f"{node.name or 'Conv'}: batch dimension mismatch")
+
+
+def prepare_quantized_model(model):
+    """Apply only explicit, supported fallback rewrites; reject ambiguous tensors."""
+    if model.graph.sparse_initializer:
+        raise ValueError("sparse initializers are not supported by this emitter")
+    # DequantizeLinear is admitted only as an initializer-folding pattern;
+    # _dequantize_int8_initializers removes it before ordinary code generation.
+    # These template operators contain static_assert(false) and cannot compile.
+    unimplemented_template_ops = {"LSTM", "Slice", "Gather", "Concat", "GRU", "Pad"}
+    allowed_ops = (set(nodeEndpointNames) - unimplemented_template_ops) | {"DequantizeLinear"}
+    unsupported_nodes = [
+        f"{node.name or '<unnamed>'}:{node.domain or 'ai.onnx'}::{node.op_type}"
+        for node in model.graph.node
+        if node.domain not in ("", "ai.onnx") or node.op_type not in allowed_ops
+    ]
+    if unsupported_nodes:
+        raise ValueError("unsupported ONNX operator(s): " + ", ".join(unsupported_nodes))
+    _decode_ternary_initializers(model)
+    _dequantize_int8_initializers(model)
+    _promote_float16_tensors(model)
+
+    # No unsupported quantized tensor type may reach the ordinary emitter.
+    unsupported = []
+    for tensor in model.graph.initializer:
+        if tensor.data_type in (onnx.TensorProto.INT8, onnx.TensorProto.UINT8,
+                                onnx.TensorProto.FLOAT16):
+            unsupported.append(f"{tensor.name}: ONNX tensor type {tensor.data_type}")
+    for value_info in list(model.graph.input) + list(model.graph.output) + list(model.graph.value_info):
+        elem_type = value_info.type.tensor_type.elem_type
+        if elem_type in (onnx.TensorProto.INT8, onnx.TensorProto.UINT8,
+                         onnx.TensorProto.FLOAT16):
+            unsupported.append(f"{value_info.name}: graph value type {elem_type}")
+    if unsupported:
+        raise ValueError("unsupported quantized tensors remain after fallback: "
+                         + "; ".join(unsupported))
+
+
+
+def _walk_graph_tensors(graph):
+    """Yield every tensor payload reachable through nested ONNX graph attributes."""
+    yield from graph.initializer
+    for sparse in graph.sparse_initializer:
+        yield sparse.values
+        yield sparse.indices
+    for node in graph.node:
+        for attribute in node.attribute:
+            if attribute.type == onnx.AttributeProto.TENSOR:
+                yield attribute.t
+            elif attribute.type == onnx.AttributeProto.TENSORS:
+                yield from attribute.tensors
+            elif attribute.type == onnx.AttributeProto.GRAPH:
+                yield from _walk_graph_tensors(attribute.g)
+            elif attribute.type == onnx.AttributeProto.GRAPHS:
+                for nested_graph in attribute.graphs:
+                    yield from _walk_graph_tensors(nested_graph)
+
+
+def reject_external_data(model):
+    """Reject external tensor references in the main graph and all subgraphs."""
+    external = [
+        tensor.name or "<unnamed>"
+        for tensor in _walk_graph_tensors(model.graph)
+        if tensor.data_location == onnx.TensorProto.EXTERNAL or tensor.external_data
+    ]
+    if external:
+        raise ValueError("external ONNX tensor data is not supported: " + ", ".join(external))
+
+
+def main(argv):
+    if not argv:
+        usage()
+        return 1
+
+    try:
+        opts, args = getopt.getopt(argv, "h", ["patchDir=", "model="])
+    except getopt.GetoptError as exc:
+        print(f"Invalid arguments: {exc}", file=sys.stderr)
+        usage()
+        return 2
+
+    patchDir = None
+    model = None
+    for opt, arg in opts:
+        if opt == "-h":
+            usage()
+            return 0
+        if opt == "--patchDir":
+            if patchDir is not None:
+                print("Model conversion refused: --patchDir may be specified only once", file=sys.stderr)
+                return 2
+            patchDir = arg
+        elif opt == "--model":
+            if model is not None:
+                print("Model conversion refused: --model may be specified only once", file=sys.stderr)
+                return 2
+            model = arg
+
+    if model is None:
+        if len(args) != 1:
+            print("Model conversion refused: provide exactly one model path or --model <file>", file=sys.stderr)
+            return 2
+        model = args[0]
+    elif args:
+        print("Model conversion refused: unexpected positional argument(s): " + " ".join(args), file=sys.stderr)
+        return 2
+
+    try:
+        if not os.path.isfile(model):
+            raise ValueError(f"ONNX model file not found or not regular: {model}")
+        onnxModel = onnx.load(model, load_external_data=False)
+        reject_external_data(onnxModel)
+        onnx.checker.check_model(onnxModel)
+        prepare_quantized_model(onnxModel)
+        inferredModel = shape_inference.infer_shapes(onnxModel)
+        validate_cmajor_operator_contracts(inferredModel)
+        onnx.checker.check_model(inferredModel)
+        generateNodesAndConnections(inferredModel)
+        printCmajor(patchDir)
+    except Exception as exc:
+        print(f"Model conversion refused: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
