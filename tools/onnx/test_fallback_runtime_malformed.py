@@ -1,8 +1,9 @@
+"""Regression tests for malformed public fallback payloads."""
+
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
-"""Regression tests for malformed public fallback payloads."""
 import unittest
 
 from schema_review.fallback_runtime import FallbackError, execute_and_validate
