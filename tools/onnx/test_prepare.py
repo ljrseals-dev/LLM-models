@@ -66,6 +66,15 @@ class PrepareModelTests(unittest.TestCase):
             self.assertEqual(patch_manifest["ID"], provenance["cmajor_patch_id"])
             self.assertNotIn("your_name", patch_manifest["ID"])
             self.assertEqual(provenance["source_sha256"], digest)
+            self.assertEqual(
+                provenance["source_revisions"]["ljrseals-dev/schema"],
+                "fce779ea30a098794e298e39ae3fd8c96e80bd85",
+            )
+            self.assertEqual(
+                provenance["source_revisions"]["cmajor-lang/cmajor"],
+                "4e9568a2dacfff633fabf6726d6c6affc3a19069",
+            )
+            self.assertIn("onnx", provenance["tool_versions"])
             self.assertEqual(provenance["source_artifact_id"], "fixture-onnx")
             self.assertFalse(provenance["cmajor_compilation_verified"])
             self.assertFalse(provenance["onnx_runtime_parity_verified"])
