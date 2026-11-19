@@ -5,7 +5,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 import numpy as np
 import pytest
 
-from realm_quant.quantization import _ternarize, pack_2bit, unpack_2bit
+from realm_quant.quantization import _ternarize, pack_2bit, unpack_2bit, quantize_model
 
 
 def test_pack_unpack_round_trip_all_symbols():
@@ -39,3 +39,48 @@ def test_ternary_rejects_nonfinite_weights():
 def test_ternary_requires_matrix_or_higher_rank():
     with pytest.raises(ValueError):
         _ternarize(np.array([1.0, 2.0], dtype=np.float32), 0.7)
+
+
+def test_pack_rejects_values_that_would_wrap_to_valid_symbols():
+    for values in ([256], [-1], [1.5], [True]):
+        with pytest.raises(ValueError):
+            pack_2bit(values)
+
+
+def test_unpack_rejects_non_byte_values_and_non_integer_count():
+    for packed, count in (([256], 1), ([-1], 1), ([1.5], 1), ([0], 1.5)):
+        with pytest.raises(ValueError):
+            unpack_2bit(packed, count)
+
+
+def test_quantizer_rejects_external_tensor_data_in_nested_graph(tmp_path):
+    import onnx
+    from onnx import TensorProto, helper
+
+    tensor = helper.make_tensor("nested_weight", TensorProto.FLOAT, [1], [1.0])
+    tensor.data_location = TensorProto.EXTERNAL
+    entry = tensor.external_data.add()
+    entry.key = "location"
+    entry.value = "../../outside.bin"
+    nested = helper.make_graph([], "nested-branch", [], [], initializer=[tensor])
+    empty = helper.make_graph([], "empty-branch", [], [])
+    condition = helper.make_tensor_value_info("condition", TensorProto.BOOL, [])
+    output = helper.make_tensor_value_info("result", TensorProto.FLOAT, [1])
+    node = helper.make_node("If", ["condition"], ["result"],
+                            then_branch=nested, else_branch=empty)
+    graph = helper.make_graph([node], "outer", [condition], [output])
+    model = helper.make_model(graph)
+    source = tmp_path / "external.onnx"
+    destination = tmp_path / "quantized.onnx"
+    source.write_bytes(model.SerializeToString())
+
+    with pytest.raises(ValueError, match="nested_weight"):
+        quantize_model(source, destination, "fp16")
+    assert not destination.exists()
+
+
+def test_quantizer_refuses_to_overwrite_source(tmp_path):
+    source = tmp_path / "model.onnx"
+    source.write_bytes(b"not an ONNX model")
+    with pytest.raises(ValueError, match="source and destination"):
+        quantize_model(source, source, "fp16")
