@@ -217,7 +217,6 @@ def getOperatorParameters (op: onnx.NodeProto):
 
     if op.op_type == "Add":
         return " (" + inputDataType + ")"
-
     if op.op_type == "Tanh":
         return " (" + inputDataType + ")"
 
@@ -439,7 +438,6 @@ def usage():
 
 """)
 
-
 def _tensor_shape(tensor):
     return [int(d) for d in tensor.dims]
 
@@ -657,8 +655,7 @@ def _promote_float16_tensors(model):
                     values = promote_float16(words, transform_shape)
                 except (FallbackError, TypeError, ValueError) as exc:
                     raise ValueError(f"{node.name}: FLOAT16 Constant promotion rejected: {exc}") from exc
-                replacement = numpy_helper.from_array(
-                    np.asarray(values, dtype=np.float32).reshape(tuple(shape)),
+                replacement = numpy_helper.from_array(                    np.asarray(values, dtype=np.float32).reshape(tuple(shape)),
                     name=attribute.t.name,
                 )
                 attribute.t.CopyFrom(replacement)
@@ -827,6 +824,36 @@ def prepare_quantized_model(model):
 
 
 
+def _walk_graph_tensors(graph):
+    """Yield every tensor payload reachable through nested ONNX graph attributes."""
+    yield from graph.initializer
+    for sparse in graph.sparse_initializer:
+        yield sparse.values
+        yield sparse.indices
+    for node in graph.node:
+        for attribute in node.attribute:
+            if attribute.type == onnx.AttributeProto.TENSOR:
+                yield attribute.t
+            elif attribute.type == onnx.AttributeProto.TENSORS:
+                yield from attribute.tensors
+            elif attribute.type == onnx.AttributeProto.GRAPH:
+                yield from _walk_graph_tensors(attribute.g)
+            elif attribute.type == onnx.AttributeProto.GRAPHS:
+                for nested_graph in attribute.graphs:
+                    yield from _walk_graph_tensors(nested_graph)
+
+
+def reject_external_data(model):
+    """Reject external tensor references in the main graph and all subgraphs."""
+    external = [
+        tensor.name or "<unnamed>"
+        for tensor in _walk_graph_tensors(model.graph)
+        if tensor.data_location == onnx.TensorProto.EXTERNAL or tensor.external_data
+    ]
+    if external:
+        raise ValueError("external ONNX tensor data is not supported: " + ", ".join(external))
+
+
 def main(argv):
     if not argv:
         usage()
@@ -869,16 +896,7 @@ def main(argv):
         if not os.path.isfile(model):
             raise ValueError(f"ONNX model file not found or not regular: {model}")
         onnxModel = onnx.load(model, load_external_data=False)
-        graph_tensors = list(onnxModel.graph.initializer)
-        for sparse in onnxModel.graph.sparse_initializer:
-            graph_tensors.extend((sparse.values, sparse.indices))
-        external = [
-            tensor.name or "<unnamed>"
-            for tensor in graph_tensors
-            if tensor.data_location == onnx.TensorProto.EXTERNAL or tensor.external_data
-        ]
-        if external:
-            raise ValueError("external ONNX tensor data is not supported: " + ", ".join(external))
+        reject_external_data(onnxModel)
         onnx.checker.check_model(onnxModel)
         prepare_quantized_model(onnxModel)
         inferredModel = shape_inference.infer_shapes(onnxModel)
