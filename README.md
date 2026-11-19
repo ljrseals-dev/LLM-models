@@ -151,20 +151,26 @@ A failed validation stops deployment. A failed health check must not silently re
 | JSON Schema                          | Present                         |
 | Local registry layout                | Implemented (`registry/`)       |
 | CLI: list, inspect, register, status | Implemented                     |
-| Download (`pull`) + SHA-256 verify   | Implemented                     |
-| Content-addressed storage + quarantine | Implemented                   |
-| Audit log                            | Implemented                     |
+| HTTPS download (`pull`) + optional SHA-256 verification | Implemented; resumable partials |
+| Content-addressed storage + quarantine | Implemented; immutable hashes  |
+| Manifest schema validation           | Implemented; fails closed       |
+| Isolated regression tests + CI        | Implemented                     |
+| Audit log                            | Basic append-only local log     |
 | Quantization / preparation (M3)      | Scaffold only                   |
 | Runtime / deployment (M4)            | Scaffold only                   |
 | Multi-backend (M5)                   | Not started                     |
 | StackAlign integration (M6)          | Spec only (`docs/INTEGRATION.md`)|
 
-Legacy installer scripts (Scholar AI, Termux llama.cpp) live under `contrib/` as historical examples only.
+The `prepare`, `deploy`, and `rollback` commands deliberately return a nonzero status until their milestones are implemented. They do not pretend to perform work.
+
+Legacy installer scripts (Scholar AI, Termux llama.cpp) live under `contrib/` as historical examples only; they are not part of the supported registry CLI.
 
 ### Quick start (local)
 
 ```bash
 # From the repository root
+# Required local tools: bash, jq, check-jsonschema, curl or wget,
+# and sha256sum or shasum.
 bash cli/llm-models status
 bash cli/llm-models register examples/phi-3.5-mini.example.manifest.json
 bash cli/llm-models list
