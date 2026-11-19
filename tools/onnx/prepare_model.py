@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
+import re
 import shutil
 import sys
 
@@ -129,6 +130,17 @@ def prepare(args) -> dict:
         if missing:
             raise RuntimeError("Cmajor emitter did not create required files: " + ", ".join(missing))
 
+        patch_manifest_path = output / "model.cmajorpatch"
+        patch_manifest = json.loads(patch_manifest_path.read_text(encoding="utf-8"))
+        slug = re.sub(r"[^a-z0-9]+", "-", args.model_id.lower()).strip("-") or "model"
+        patch_manifest["ID"] = f"org.llm-models.generated.{slug}"
+        patch_manifest["name"] = args.model_id
+        patch_manifest["manufacturer"] = "LLM-models"
+        patch_manifest["description"] = f"Generated from verified ONNX artifact {args.artifact_id}"
+        patch_manifest_path.write_text(
+            json.dumps(patch_manifest, indent=2) + "\n", encoding="utf-8"
+        )
+
         output_hashes = {name: sha256_file(output / name) for name in required}
         transformations = []
         if input_counts["float16_initializers"]:
@@ -152,6 +164,7 @@ def prepare(args) -> dict:
             "input_tensor_counts": input_counts,
             "transformations": transformations,
             "output_format": "cmajor-patch",
+            "cmajor_patch_id": patch_manifest["ID"],
             "output_files_sha256": output_hashes,
             "weights_representation": "FLOAT32 constants in generated Cmajor source",
             "cmajor_compilation_verified": False,
