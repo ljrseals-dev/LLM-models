@@ -1,9 +1,9 @@
+"""Independent execution and validation tests for fallback transforms."""
+from __future__ import annotations
+
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
-
-"""Independent execution and validation tests for fallback transforms."""
-from __future__ import annotations
 
 import unittest
 
