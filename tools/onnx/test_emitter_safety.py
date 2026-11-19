@@ -44,6 +44,22 @@ def quantized_model_with_dequantize_attribute(attribute_name: str, attribute_val
     return helper.make_model(graph, opset_imports=[helper.make_opsetid("", 21)])
 
 
+class MissingNodeNameTests(unittest.TestCase):
+    def test_generated_node_names_skip_existing_names(self):
+        first = helper.make_node("Identity", ["x"], ["a"], name="node_1")
+        second = helper.make_node("Identity", ["a"], ["b"], name="")
+        third = helper.make_node("Identity", ["b"], ["c"], name="node_2")
+        fourth = helper.make_node("Identity", ["c"], ["d"], name="")
+        graph = helper.make_graph([first, second, third, fourth], "names", [], [])
+        model = helper.make_model(graph)
+
+        onnxToCmajor.populateMissingNodeNames(model)
+
+        self.assertEqual([node.name for node in model.graph.node],
+                         ["node_1", "node_3", "node_2", "node_4"])
+        self.assertEqual(len({node.name for node in model.graph.node}), 4)
+
+
 class NestedExternalTensorTests(unittest.TestCase):
     def test_rejects_external_tensor_inside_graph_attribute(self):
         model = model_with_nested_tensor(external=True)
