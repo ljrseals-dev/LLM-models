@@ -119,6 +119,7 @@ def prepare(args) -> dict:
 
     emitter.prepare_quantized_model(model)
     inferred = shape_inference.infer_shapes(model)
+    emitter.validate_cmajor_operator_contracts(inferred)
     onnx.checker.check_model(inferred)
 
     output.parent.mkdir(parents=True, exist_ok=True)
