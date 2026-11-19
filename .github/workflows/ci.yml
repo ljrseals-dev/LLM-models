@@ -51,7 +51,8 @@ jobs:
         run: "$RUNNER_TEMP/venv/bin/python tools/onnx/test_prepare.py"
 
       - name: Test Realm-Quant algorithms and ONNX Runtime execution
-        run: "$RUNNER_TEMP/venv/bin/python" -m pytest -q tools/quantization
+        run: |
+          "$RUNNER_TEMP/venv/bin/python" -m pytest -q tools/quantization
 
       - name: Test CLI ONNX preparation lifecycle
         run: bash tools/onnx/test_cli_prepare.sh
