@@ -60,6 +60,11 @@ class PrepareModelTests(unittest.TestCase):
                 self.assertTrue((output / name).is_file(), name)
 
             provenance = json.loads((output / "provenance.json").read_text())
+            patch_manifest = json.loads((output / "model.cmajorpatch").read_text())
+            self.assertEqual(patch_manifest["name"], "tests/quantized-fixture")
+            self.assertEqual(patch_manifest["manufacturer"], "LLM-models")
+            self.assertEqual(patch_manifest["ID"], provenance["cmajor_patch_id"])
+            self.assertNotIn("your_name", patch_manifest["ID"])
             self.assertEqual(provenance["source_sha256"], digest)
             self.assertEqual(provenance["source_artifact_id"], "fixture-onnx")
             self.assertFalse(provenance["cmajor_compilation_verified"])
