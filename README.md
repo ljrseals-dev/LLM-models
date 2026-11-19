@@ -1,7 +1,12 @@
 # LLM-models
 
-> ⚠️ **CAUTION — REVIEW SAFETY, PROVENANCE, AND LEGAL STATUS BEFORE USE**
->
+> **Local-first model registry and distribution engine**
+
+A verifiable, self-hosted model supply chain: discover, acquire, verify, prepare, and deploy models with explicit provenance and trust.
+
+---
+
+> ⚠️ **CAUTION — REVIEW SAFETY, PROVENANCE, AND LEGAL STATUS BEFORE USE**  
 > This repository may contain or link to model-related code, weights, configurations, documentation, or other technical materials whose origin, capabilities, intended use, and downstream effects have not necessarily been independently verified. Do not assume that material is safe, lawful to use, authorized for redistribution, or suitable for deployment merely because it is publicly accessible here.
 
 ## Important human-safety warning
@@ -9,11 +14,12 @@
 The maintainer has raised concerns that technology of this general kind may be connected to government secrecy, coercive use, surveillance, or serious harm to people. Those concerns are a reason to exercise care; **this README does not independently verify any classification, government action, death, or causal connection between a particular technology and harm to any person.** No such allegation should be treated as an established fact without reliable, independently reviewable evidence.
 
 Do not use, adapt, distribute, or combine material from this repository to facilitate:
-- violence, threats, intimidation, or physical harm;
-- unlawful surveillance, stalking, persecution, or targeting of individuals;
-- discrimination, coercion, manipulation, or denial of rights;
-- weapons development or operational targeting;
-- unauthorized access, credential theft, or other unlawful activity.
+
+* violence, threats, intimidation, or physical harm;
+* unlawful surveillance, stalking, persecution, or targeting of individuals;
+* discrimination, coercion, manipulation, or denial of rights;
+* weapons development or operational targeting;
+* unauthorized access, credential theft, or other unlawful activity.
 
 Respect human rights, privacy, applicable law, contractual restrictions, and the rights of model, dataset, and software authors.
 
@@ -31,10 +37,11 @@ Respect human rights, privacy, applicable law, contractual restrictions, and the
 The repository and any materials made available through it are provided **“AS IS” and “AS AVAILABLE,”** without warranties or conditions of any kind, to the maximum extent permitted by applicable law. This includes, without limitation, warranties of title, non-infringement, merchantability, fitness for a particular purpose, accuracy, security, availability, and freedom from defects.
 
 The maintainer does not warrant that:
-- any code, model, weight, dataset, link, or documentation is authentic, complete, current, secure, accurate, or fit for a particular purpose;
-- any material is authorized for a particular use or redistribution;
-- outputs will be safe, lawful, unbiased, or reliable; or
-- the repository complies with every law or regulatory requirement applicable to every user's circumstances.
+
+* any code, model, weight, dataset, link, or documentation is authentic, complete, current, secure, accurate, or fit for a particular purpose;
+* any material is authorized for a particular use or redistribution;
+* outputs will be safe, lawful, unbiased, or reliable; or
+* the repository complies with every law or regulatory requirement applicable to every user's circumstances.
 
 No technical, legal, safety, or compliance certification is made by this README.
 
@@ -58,10 +65,10 @@ If you identify material that appears to create an immediate risk to a person, d
 
 For repository-related concerns:
 
-- **Security vulnerability:** use GitHub's private vulnerability reporting / Security Advisories feature for this repository if enabled. Do not publish exploit details, credentials, personal data, or sensitive operational information in a public issue.
-- **Potentially unlawful or rights-infringing content:** use GitHub's official [reporting and abuse channels](https://support.github.com/) and provide the specific repository path, URL, relevant commit, and a factual explanation.
-- **License or provenance concern:** open a concise issue that identifies the exact file or model and provides verifiable source or license evidence. Do not post confidential or classified material.
-- **Human-safety concern:** report credible, specific threats to the appropriate competent authority. Preserve relevant public URLs and timestamps; avoid speculation and do not expose victims or private individuals.
+* **Security vulnerability:** use GitHub's private vulnerability reporting / Security Advisories feature for this repository if enabled. Do not publish exploit details, credentials, personal data, or sensitive operational information in a public issue.
+* **Potentially unlawful or rights-infringing content:** use GitHub's official [reporting and abuse channels](https://support.github.com/) and provide the specific repository path, URL, relevant commit, and a factual explanation.
+* **License or provenance concern:** open a concise issue that identifies the exact file or model and provides verifiable source or license evidence. Do not post confidential or classified material.
+* **Human-safety concern:** report credible, specific threats to the appropriate competent authority. Preserve relevant public URLs and timestamps; avoid speculation and do not expose victims or private individuals.
 
 Reports should distinguish firsthand evidence from inference, identify dates and affected files, and avoid unsupported accusations. Do not include classified, export-controlled, privileged, or personal information in public GitHub reports.
 
@@ -72,3 +79,126 @@ This warning applies to the repository as a whole, including links and materials
 ---
 
 **Maintainer notice:** This document is a practical safety and risk notice, not legal advice, a finding of fact, a formal compliance report, or a certification that the repository or any proposed use is lawful. Have a qualified attorney review the repository and any intended distribution terms before relying on a disclaimer or hold-harmless provision.
+
+---
+
+## Project Vision
+
+**LLM-models** is intended to become a **local-first model registry and distribution engine**.
+
+It is designed as the model supply chain for self-hosted AI infrastructure:
+
+| Layer              | Responsibility                                      | Owner          |
+|--------------------|-----------------------------------------------------|----------------|
+| Model registry     | Discover, catalog, version, license, provenance     | LLM-models     |
+| Artifact manager   | Download, cache, resume, content-addressed storage  | LLM-models     |
+| Trust & validation | Hashes, signatures, format checks, quarantine       | LLM-models     |
+| Preparation        | Quantization, conversion, derived-artifact records  | LLM-models     |
+| Runtime            | Local inference backends, lifecycle, health         | LLM-models     |
+| Host infrastructure| Provisioning, LEMP, security, firewall              | StackAlign     |
+| Integration        | Optional, narrow service contract                   | Companion      |
+
+### Design Principles
+
+- **Local-first**: No mandatory cloud provider or proprietary marketplace.
+- **Verifiable**: Models are never considered verified merely because they downloaded.
+- **Explicit**: Deployment, quantization, and network exposure require deliberate action.
+- **Reproducible**: Derived artifacts (e.g. quantizations) record source hash, tool, parameters, and output hash.
+- **Backend-independent**: Start with llama.cpp (GGUF) and ONNX Runtime; support additional backends via adapters.
+- **Safe defaults**: Loopback-only inference by default; no automatic public exposure; quarantine on failed validation.
+
+### Proposed CLI Surface (target)
+
+```bash
+llm-models search "coding"
+llm-models inspect model-name
+llm-models pull model-name --version 1.2
+llm-models verify model-name
+llm-models prepare model-name --quantization Q4_K_M
+llm-models deploy model-name
+llm-models status
+llm-models rollback
+```
+
+These commands describe the intended user experience. They are not yet fully implemented.
+
+### Artifact Lifecycle
+
+```
+DISCOVERED → DOWNLOADED → VERIFIED → PREPARED → VALIDATED → DEPLOYED → HEALTH_CHECKED
+```
+
+A failed validation stops deployment. A failed health check must not silently replace a working model.
+
+### What this project will not do
+
+- Automatically download models during ordinary StackAlign installation.
+- Trust a model merely because it comes from a popular hosting service.
+- Bundle model weights into the application repository.
+- Silently quantize or replace a model.
+- Expose an inference API on a public interface by default.
+- Claim that a model is safe, unbiased, licensed for every use, or suitable for production simply because validation checks passed.
+
+---
+
+## Current Status
+
+| Milestone / Deliverable              | Status                          |
+|--------------------------------------|---------------------------------|
+| Safety / legal README                | Present                         |
+| Project vision and architecture      | Documented (`docs/VISION.md`)   |
+| Model manifest specification         | Draft (`docs/MANIFEST.md`)      |
+| JSON Schema                          | Present                         |
+| Local registry layout                | Implemented (`registry/`)       |
+| CLI: list, inspect, register, status | Implemented                     |
+| Download (`pull`) + SHA-256 verify   | Implemented                     |
+| Content-addressed storage + quarantine | Implemented                   |
+| Audit log                            | Implemented                     |
+| Quantization / preparation (M3)      | Scaffold only                   |
+| Runtime / deployment (M4)            | Scaffold only                   |
+| Multi-backend (M5)                   | Not started                     |
+| StackAlign integration (M6)          | Spec only (`docs/INTEGRATION.md`)|
+
+Legacy installer scripts (Scholar AI, Termux llama.cpp) live under `contrib/` as historical examples only.
+
+### Quick start (local)
+
+```bash
+# From the repository root
+bash cli/llm-models status
+bash cli/llm-models register examples/phi-3.5-mini.example.manifest.json
+bash cli/llm-models list
+bash cli/llm-models inspect example/phi-3.5-mini
+bash scripts/smoke-test.sh
+```
+
+See also:
+
+- [`docs/VISION.md`](docs/VISION.md) — full architectural recommendation  
+- [`docs/MANIFEST.md`](docs/MANIFEST.md) — model manifest specification  
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — milestone tracking  
+- [`docs/INTEGRATION.md`](docs/INTEGRATION.md) — StackAlign contract notes  
+- [`schemas/model-manifest.schema.json`](schemas/model-manifest.schema.json)  
+
+---
+
+## Relationship to StackAlign
+
+StackAlign is a separate project focused on guarded LEMP installation and host operations for EL-family Linux systems. It deliberately excludes AI/ML tooling from its core.
+
+The intended relationship is:
+
+- **StackAlign** owns the host and infrastructure.
+- **LLM-models** owns the models.
+- A narrow, optional integration contract allows StackAlign-managed hosts to discover and consume a locally running model service without embedding model logic in StackAlign itself.
+
+This separation preserves StackAlign’s security model and scope while enabling a coherent self-hosted AI infrastructure ecosystem.
+
+---
+
+## Contributing / Development Notes
+
+- Prefer small, reviewable changes.
+- Manifest and verification correctness are higher priority than feature breadth.
+- Do not introduce automatic network exposure or silent model mutation.
+- Keep the safety posture of this README intact.

@@ -1,0 +1,418 @@
+#!/usr/bin/env bash
+# llm-models — local-first model registry CLI
+# Implements M1 (registry foundation) + M2 (distribution & verification) foundation
+
+set -euo pipefail
+
+VERSION="0.2.0-m2"
+PROG="llm-models"
+
+# Locate library relative to this script
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=../lib/common.sh
+source "$ROOT/lib/common.sh"
+
+# ---------------------------------------------------------------------------
+# Usage
+# ---------------------------------------------------------------------------
+
+usage() {
+  cat <<EOF
+$PROG $VERSION — local-first model registry
+
+Usage:
+  $PROG <command> [options]
+
+Registry & inspection:
+  list                          List registered models
+  inspect <id>                  Show manifest details
+  status                        Registry and host summary
+
+Registration & verification (M1/M2):
+  register <manifest.json>      Register a model from a manifest file
+  verify <id>                   Verify all artifacts for a model (SHA-256)
+  pull <url> [--sha256 HASH] [--filename NAME]
+                                Download an artifact, verify hash, store it
+
+Preparation & deployment (scaffolded — later milestones):
+  prepare <id> [--quant METHOD] Placeholder for quantization / conversion
+  deploy <id>                   Placeholder for local runtime launch
+  rollback                      Placeholder for rollback
+
+Other:
+  help                          Show this help
+  version                       Show version
+
+Environment:
+  LLM_MODELS_ROOT       Override repository root
+  LLM_MODELS_REGISTRY   Override registry directory (default: ./registry)
+
+Notes:
+  - Models are never considered verified just because they downloaded.
+  - Failed verification places artifacts in quarantine/.
+  - See docs/VISION.md and docs/MANIFEST.md for the full design.
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+cmd_version() {
+  echo "$PROG $VERSION"
+}
+
+cmd_status() {
+  ensure_registry
+  local count
+  count=$(list_manifests | wc -l | tr -d ' ')
+  echo "LLM-models registry status"
+  echo "  Version:     $VERSION"
+  echo "  Root:        $ROOT"
+  echo "  Registry:    $REGISTRY_DIR"
+  echo "  Manifests:   $count"
+  echo "  Schema:      $( [[ -f "$SCHEMA_FILE" ]] && echo present || echo missing )"
+  echo ""
+  echo "Host (best-effort):"
+  if command -v free >/dev/null 2>&1; then
+    local mem
+    mem=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}') || mem="unknown"
+    echo "  Memory:      ${mem} MB"
+  else
+    echo "  Memory:      unknown"
+  fi
+  echo "  Arch:        $(uname -m 2>/dev/null || echo unknown)"
+  echo "  OS:          $(uname -s 2>/dev/null || echo unknown)"
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    echo "  GPU:         nvidia-smi present"
+  else
+    echo "  GPU:         no nvidia-smi"
+  fi
+  echo ""
+  echo "Lifecycle stages implemented:"
+  echo "  DISCOVERED / REGISTERED  → yes (register, list, inspect)"
+  echo "  DOWNLOADED               → yes (pull)"
+  echo "  VERIFIED                 → yes (verify, hash checks)"
+  echo "  PREPARED / DEPLOYED      → scaffold only"
+}
+
+cmd_list() {
+  ensure_registry
+  local files
+  files=$(list_manifests)
+  if [[ -z "$files" ]]; then
+    echo "No models registered."
+    echo "Use: $PROG register <manifest.json>"
+    return 0
+  fi
+  printf "%-32s  %-16s  %-12s  %s\n" "ID" "VERSION" "PUBLISHER" "NAME"
+  printf "%-32s  %-16s  %-12s  %s\n" "--------------------------------" "----------------" "------------" "----"
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    local id version publisher name
+    id=$(json_get "$f" "id")
+    version=$(json_get "$f" "version")
+    publisher=$(json_get "$f" "publisher")
+    name=$(json_get "$f" "name")
+    printf "%-32s  %-16s  %-12s  %s\n" "${id:-?}" "${version:-?}" "${publisher:-?}" "${name:-?}"
+  done <<< "$files"
+}
+
+cmd_inspect() {
+  local id="${1:-}"
+  [[ -n "$id" ]] || die "Usage: $PROG inspect <model-id>"
+
+  ensure_registry
+  local path
+  path=$(manifest_path "$id")
+  if [[ ! -f "$path" ]]; then
+    local candidates
+    candidates=$(find "$MANIFESTS_DIR" -name "*${id}*.manifest.json" 2>/dev/null | head -5)
+    if [[ -z "$candidates" ]]; then
+      die "No manifest found for id: $id"
+    fi
+    echo "Exact id not found. Candidates:"
+    echo "$candidates"
+    return 1
+  fi
+
+  echo "Manifest: $path"
+  echo "----------------------------------------"
+  if command -v jq >/dev/null 2>&1; then
+    jq . "$path"
+  else
+    cat "$path"
+  fi
+}
+
+cmd_register() {
+  local manifest="${1:-}"
+  [[ -n "$manifest" ]] || die "Usage: $PROG register <manifest.json>"
+  [[ -f "$manifest" ]] || die "File not found: $manifest"
+
+  ensure_registry
+
+  local id version
+  id=$(json_get "$manifest" "id")
+  version=$(json_get "$manifest" "version")
+  [[ -n "$id" ]] || die "Manifest missing required field: id"
+  [[ -n "$version" ]] || die "Manifest missing required field: version"
+
+  local dest
+  dest=$(manifest_path "$id")
+  if [[ -f "$dest" ]]; then
+    warn "Manifest already exists for $id — overwriting"
+  fi
+
+  cp "$manifest" "$dest"
+  ok "Registered $id (version $version)"
+  echo "  Stored at: $dest"
+  audit_log "REGISTER id=$id version=$version source=$manifest"
+}
+
+cmd_verify() {
+  local id="${1:-}"
+  [[ -n "$id" ]] || die "Usage: $PROG verify <model-id>"
+
+  ensure_registry
+  local path
+  path=$(manifest_path "$id")
+  [[ -f "$path" ]] || die "No manifest for id: $id"
+
+  log "Verifying artifacts for $id ..."
+
+  if ! command -v jq >/dev/null 2>&1; then
+    warn "jq not installed — limited verification"
+    warn "Install jq for full manifest-driven verification"
+    audit_log "VERIFY id=$id result=limited_no_jq"
+    return 0
+  fi
+
+  local failed=0
+  local count=0
+  local n
+  n=$(jq '.artifacts | length' "$path")
+
+  for ((i=0; i<n; i++)); do
+    local art_id filename expected role
+    art_id=$(jq -r ".artifacts[$i].id" "$path")
+    filename=$(jq -r ".artifacts[$i].filename" "$path")
+    expected=$(jq -r ".artifacts[$i].sha256" "$path")
+    role=$(jq -r ".artifacts[$i].role" "$path")
+
+    count=$((count+1))
+    echo ""
+    log "Artifact: $art_id ($role) — $filename"
+    log "Expected SHA-256: $expected"
+
+    local stored
+    stored=$(artifact_store_path "$expected")
+    local candidate=""
+    if [[ -f "$stored" ]]; then
+      candidate="$stored"
+    elif [[ -f "$filename" ]]; then
+      candidate="$filename"
+    elif [[ -f "$ROOT/$filename" ]]; then
+      candidate="$ROOT/$filename"
+    fi
+
+    if [[ -z "$candidate" ]]; then
+      warn "Artifact file not found locally for $art_id"
+      warn "Use: $PROG pull <url> --sha256 $expected --filename $filename"
+      failed=$((failed+1))
+      continue
+    fi
+
+    local actual
+    actual=$(sha256_file "$candidate")
+    if [[ "$actual" == "$expected" ]]; then
+      ok "Hash match for $art_id"
+      store_artifact "$candidate" "$expected" >/dev/null
+      local tmp
+      tmp=$(mktemp)
+      jq --argjson idx "$i" \
+         --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+         '.artifacts[$idx].validation = {
+            "status": "verified",
+            "checked_at": $ts,
+            "checks": [{"name":"sha256","result":"pass","details":"matched"}]
+          }' "$path" > "$tmp" && mv "$tmp" "$path"
+    else
+      err "Hash MISMATCH for $art_id"
+      err "  expected: $expected"
+      err "  actual:   $actual"
+      mkdir -p "$QUARANTINE_DIR"
+      local qdest="$QUARANTINE_DIR/${art_id}.$(date +%s)"
+      cp "$candidate" "$qdest" 2>/dev/null || true
+      warn "Copied suspect file to quarantine: $qdest"
+      local tmp
+      tmp=$(mktemp)
+      jq --argjson idx "$i" \
+         --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+         --arg det "expected $expected got $actual" \
+         '.artifacts[$idx].validation = {
+            "status": "quarantined",
+            "checked_at": $ts,
+            "checks": [{"name":"sha256","result":"fail","details":$det}]
+          }' "$path" > "$tmp" && mv "$tmp" "$path"
+      failed=$((failed+1))
+    fi
+  done
+
+  echo ""
+  if [[ $failed -eq 0 ]]; then
+    ok "All $count artifact(s) verified for $id"
+    audit_log "VERIFY id=$id result=ok count=$count"
+  else
+    err "$failed of $count artifact(s) failed verification for $id"
+    audit_log "VERIFY id=$id result=fail failed=$failed count=$count"
+    return 1
+  fi
+}
+
+cmd_pull() {
+  local url=""
+  local expected_hash=""
+  local filename=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --sha256) expected_hash="${2:-}"; shift 2 ;;
+      --filename) filename="${2:-}"; shift 2 ;;
+      --*) die "Unknown option: $1" ;;
+      *)
+        if [[ -z "$url" ]]; then
+          url="$1"
+          shift
+        else
+          die "Unexpected argument: $1"
+        fi
+        ;;
+    esac
+  done
+
+  [[ -n "$url" ]] || die "Usage: $PROG pull <url> [--sha256 HASH] [--filename NAME]"
+
+  ensure_registry
+
+  if [[ -z "$filename" ]]; then
+    filename=$(basename "$url")
+    filename="${filename%%\?*}"
+  fi
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  local dest="$tmpdir/$filename"
+
+  log "Downloading: $url"
+  log "Destination: $dest"
+
+  if command -v curl >/dev/null 2>&1; then
+    curl -fL --retry 3 --retry-delay 2 -o "$dest" "$url" \
+      || { rm -rf "$tmpdir"; die "Download failed"; }
+  elif command -v wget >/dev/null 2>&1; then
+    wget -O "$dest" "$url" \
+      || { rm -rf "$tmpdir"; die "Download failed"; }
+  else
+    rm -rf "$tmpdir"
+    die "Need curl or wget to download"
+  fi
+
+  local actual
+  actual=$(sha256_file "$dest")
+  log "Downloaded SHA-256: $actual"
+
+  if [[ -n "$expected_hash" ]]; then
+    if [[ "$actual" != "$expected_hash" ]]; then
+      mkdir -p "$QUARANTINE_DIR"
+      mv "$dest" "$QUARANTINE_DIR/$filename.$actual"
+      rm -rf "$tmpdir"
+      die "Hash mismatch — file moved to quarantine
+  expected: $expected_hash
+  actual:   $actual"
+    fi
+    ok "Hash verified"
+  else
+    warn "No --sha256 provided; artifact stored as unverified"
+  fi
+
+  local stored_hash
+  stored_hash=$(store_artifact "$dest" "${expected_hash:-}")
+  rm -rf "$tmpdir"
+
+  ok "Artifact available in registry store"
+  echo "  SHA-256: $stored_hash"
+  echo "  Path:    $(artifact_store_path "$stored_hash")"
+  audit_log "PULL url=$url sha256=$stored_hash verified=$([[ -n "$expected_hash" ]] && echo yes || echo no)"
+}
+
+cmd_prepare() {
+  local id="${1:-}"
+  [[ -n "$id" ]] || die "Usage: $PROG prepare <id> [--quant METHOD]"
+  ensure_registry
+  local path
+  path=$(manifest_path "$id")
+  [[ -f "$path" ]] || die "No manifest for id: $id"
+
+  echo "prepare: scaffold only (M3)"
+  echo "  Model: $id"
+  echo "  Intended behaviour: create derived (quantized/converted) artifacts"
+  echo "  with full provenance (parent hash, tool, parameters, output hash)."
+  echo "  Original artifacts are never overwritten."
+  audit_log "PREPARE id=$id status=scaffold"
+}
+
+cmd_deploy() {
+  local id="${1:-}"
+  [[ -n "$id" ]] || die "Usage: $PROG deploy <id>"
+  ensure_registry
+  local path
+  path=$(manifest_path "$id")
+  [[ -f "$path" ]] || die "No manifest for id: $id"
+
+  echo "deploy: scaffold only (M4)"
+  echo "  Model: $id"
+  echo "  Intended behaviour:"
+  echo "    - Require validation.status == verified"
+  echo "    - Launch configured backend (llama.cpp / ONNX Runtime) on loopback"
+  echo "    - Record deployment and health status"
+  echo "    - Support rollback to previous healthy deployment"
+  audit_log "DEPLOY id=$id status=scaffold"
+}
+
+cmd_rollback() {
+  echo "rollback: scaffold only (M4)"
+  echo "  Intended behaviour: restore previously healthy deployment."
+  audit_log "ROLLBACK status=scaffold"
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+main() {
+  local cmd="${1:-help}"
+  shift || true
+
+  case "$cmd" in
+    help|-h|--help)     usage ;;
+    version|-V|--version) cmd_version ;;
+    status)             cmd_status "$@" ;;
+    list)               cmd_list "$@" ;;
+    inspect)            cmd_inspect "$@" ;;
+    register)           cmd_register "$@" ;;
+    verify)             cmd_verify "$@" ;;
+    pull)               cmd_pull "$@" ;;
+    prepare)            cmd_prepare "$@" ;;
+    deploy)             cmd_deploy "$@" ;;
+    rollback)           cmd_rollback "$@" ;;
+    *)
+      err "Unknown command: $cmd"
+      echo "Run '$PROG help' for usage." >&2
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

@@ -1,0 +1,177 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ljrseals-dev/LLM-models/schemas/model-manifest.schema.json",
+  "title": "LLM-models Model Manifest",
+  "description": "Machine-readable description of a model and its artifacts for the LLM-models local registry.",
+  "type": "object",
+  "required": [
+    "manifest_version",
+    "id",
+    "name",
+    "version",
+    "publisher",
+    "license",
+    "source",
+    "artifacts"
+  ],
+  "properties": {
+    "manifest_version": {
+      "type": "string",
+      "description": "Version of the manifest schema.",
+      "const": "1.0"
+    },
+    "id": {
+      "type": "string",
+      "description": "Stable model identifier (e.g. publisher/name).",
+      "minLength": 1
+    },
+    "name": {
+      "type": "string",
+      "description": "Human-readable model name.",
+      "minLength": 1
+    },
+    "version": {
+      "type": "string",
+      "description": "Immutable version string for this model/artifact set.",
+      "minLength": 1
+    },
+    "publisher": {
+      "type": "string",
+      "description": "Publisher or organization.",
+      "minLength": 1
+    },
+    "description": {
+      "type": "string"
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "parameters": {
+      "description": "Approximate parameter count.",
+      "oneOf": [
+        { "type": "string" },
+        { "type": "number" }
+      ]
+    },
+    "architecture": {
+      "type": "string"
+    },
+    "context_length": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "known_limitations": {
+      "type": "string"
+    },
+    "license": {
+      "type": "object",
+      "required": [],
+      "properties": {
+        "spdx": { "type": "string" },
+        "name": { "type": "string" },
+        "url": { "type": "string", "format": "uri" },
+        "restrictions": { "type": "string" }
+      },
+      "anyOf": [
+        { "required": ["spdx"] },
+        { "required": ["name"] }
+      ]
+    },
+    "source": {
+      "type": "object",
+      "properties": {
+        "upstream_repo": { "type": "string" },
+        "upstream_revision": { "type": "string" },
+        "original_url": { "type": "string" },
+        "retrieved_at": { "type": "string", "format": "date-time" },
+        "notes": { "type": "string" }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "role", "format", "filename", "sha256"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "role": {
+            "type": "string",
+            "enum": ["original", "quantized", "converted", "other"]
+          },
+          "format": {
+            "type": "string",
+            "enum": ["gguf", "onnx", "safetensors", "pytorch", "other"]
+          },
+          "filename": { "type": "string", "minLength": 1 },
+          "size_bytes": { "type": "integer", "minimum": 0 },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-fA-F0-9]{64}$"
+          },
+          "signature": {
+            "type": "object",
+            "properties": {
+              "type": { "type": "string" },
+              "value": { "type": "string" },
+              "public_key_id": { "type": "string" }
+            }
+          },
+          "quantization": {
+            "type": "object",
+            "properties": {
+              "method": { "type": "string" },
+              "parent_artifact_id": { "type": "string" },
+              "tool": { "type": "string" },
+              "tool_version": { "type": "string" },
+              "parameters": { "type": "object" }
+            }
+          },
+          "hardware_requirements": {
+            "type": "object",
+            "properties": {
+              "min_ram_mb": { "type": "integer", "minimum": 0 },
+              "recommended_ram_mb": { "type": "integer", "minimum": 0 },
+              "gpu": {
+                "type": "string",
+                "enum": ["optional", "required", "none"]
+              },
+              "notes": { "type": "string" }
+            }
+          },
+          "supported_backends": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "validation": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": ["unverified", "verified", "quarantined", "failed"]
+              },
+              "checked_at": { "type": "string", "format": "date-time" },
+              "checks": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": { "type": "string" },
+                    "result": {
+                      "type": "string",
+                      "enum": ["pass", "fail", "skipped"]
+                    },
+                    "details": { "type": "string" }
+                  },
+                  "required": ["name", "result"]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "additionalProperties": true
+}
