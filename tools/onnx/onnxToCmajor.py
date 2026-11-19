@@ -224,6 +224,10 @@ def getOperatorParameters (op: onnx.NodeProto):
     if op.op_type == "Conv":
         dilations = getNodeAttributeValue (op, "dilations")
         kernelShape = getNodeAttributeValue (op, "kernel_shape")
+        if kernelShape is None:
+            raise ValueError(f"{op.name or 'Conv'}: kernel_shape could not be inferred; explicit kernel_shape is required")
+        if dilations is None:
+            dilations = "int[2] (1, 1)"
         return " (" + inputDataType + ", " + outputDataType + ", " + str (kernelShape) + ", " + str (dilations) + ")"
 
     if op.op_type == "LSTM":
@@ -232,6 +236,10 @@ def getOperatorParameters (op: onnx.NodeProto):
 
     if op.op_type == "Transpose":
         perm = getNodeAttributeValue (op, "perm")
+        if perm is None:
+            rank = getConnectionDataTypeDimensions (op.input[0])
+            reversed_axes = ", ".join(str(i) for i in reversed(range(rank)))
+            perm = "int[" + str(rank) + "] (" + reversed_axes + ")"
         totalElements = getConnectionDataTypeTotalElements (op.input[0])
         return " (" + inputDataType + ", " + outputDataType + ", " + str (totalElements) + ", " + perm + ")"
 
@@ -673,7 +681,9 @@ def prepare_quantized_model(model):
         raise ValueError("sparse initializers are not supported by this emitter")
     # DequantizeLinear is admitted only as an initializer-folding pattern;
     # _dequantize_int8_initializers removes it before ordinary code generation.
-    allowed_ops = set(nodeEndpointNames) | {"DequantizeLinear"}
+    # These template operators contain static_assert(false) and cannot compile.
+    unimplemented_template_ops = {"LSTM", "Slice", "Gather", "Concat"}
+    allowed_ops = (set(nodeEndpointNames) - unimplemented_template_ops) | {"DequantizeLinear"}
     unsupported_nodes = [
         f"{node.name or '<unnamed>'}:{node.domain or 'ai.onnx'}::{node.op_type}"
         for node in model.graph.node
