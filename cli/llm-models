@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # llm-models — local-first model registry CLI
-# M1 registry foundation and M2 artifact distribution / integrity checks.
+# M1 registry, M2 artifact distribution, and M3 verified ONNX-to-Cmajor preparation.
 
 set -euo pipefail
 
@@ -46,6 +46,7 @@ Environment:
 
 Dependencies:
   bash, jq, check-jsonschema, curl or wget, and sha256sum or shasum.
+  ONNX preparation additionally requires python3, NumPy, and ONNX (see tools/onnx/requirements.txt).
 
 Security:
   - Downloads require HTTPS and redirects remain HTTPS.
