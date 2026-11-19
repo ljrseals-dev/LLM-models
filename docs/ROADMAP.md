@@ -32,11 +32,16 @@ Tracking progress against docs/VISION.md. Status reflects code in the repository
 
 A download without --sha256 is stored by its computed digest but remains unverified until a manifest declares the expected digest and verification succeeds. A checksum proves byte identity against the supplied digest; it does not establish publisher authenticity or model safety.
 
-## M3 — Local model preparation
+## M3 — Local model quantization and preparation
 
 | Item | Status |
 |------|--------|
 | ONNX artifact selection from manifest | Implemented; requires exactly one match or --artifact |
+| FP16 weight conversion | Implemented; preserves model I/O tensor types |
+| Dynamic INT8 weight quantization | Implemented through ONNX Runtime; per-channel, selected operator types |
+| Packed 2-bit ternary weights | Implemented; NPZ sidecar and per-output-channel scales |
+| Ternary executable ONNX model | Implemented by reconstructing FLOAT weights; not native ternary arithmetic |
+| Quantization provenance | Implemented; source/output hashes, tool versions, parameters, derived-manifest fragment |
 | Verify source artifact before preparation | Implemented; digest rechecked immediately before conversion |
 | FLOAT16 initializer fallback | Implemented; promotes to FLOAT32 |
 | Signed INT8 DequantizeLinear fallback | Implemented; initializer-backed scalar/per-axis parameters only |
@@ -51,7 +56,9 @@ A download without --sha256 is stored by its computed digest but remains unverif
 | Cmajor compilation | Not yet verified in CI |
 | ONNX Runtime vs Cmajor numerical parity | Not implemented |
 
-The prepare command converts a verified ONNX artifact into a Cmajor patch under registry/prepared/ (or an explicit new output path). The supported fallback transformations are those already developed in ljrseals-dev/schema. They are conversion fallbacks: generated Cmajor constants are FLOAT32, not packed INT8 or ternary weights. See tools/onnx/README.md for contracts, refusal cases, dependencies, and licensing.
+The quantize command produces FP16, dynamic INT8, or packed ternary artifacts under registry/quantized/ (or an explicit new output path). It does not mutate the source manifest; derived-manifest.fragment.json records output artifacts and parentage for a separately versioned manifest.
+
+The prepare command converts a verified ONNX artifact into a Cmajor patch under registry/prepared/ (or an explicit new output path). The supported fallback transformations are those already developed in ljrseals-dev/schema. They are conversion fallbacks: generated Cmajor constants are FLOAT32, not packed INT8 or ternary weights. Realm-Quant's packed ternary sidecar is not yet consumed by the Cmajor emitter, and dynamic INT8 may introduce ONNX operators outside the Cmajor allowlist. See tools/onnx/README.md for contracts, refusal cases, dependencies, and licensing.
 
 ## M4 — Local deployment
 
@@ -87,8 +94,10 @@ The deploy and rollback commands exit nonzero and do not start or change service
 - tools/onnx/test_fallback.py tests numeric FLOAT16, INT8, and ternary fallback transforms.
 - tools/onnx/test_prepare.py tests verified ONNX-to-Cmajor generation, provenance hashes, and no-overwrite behavior.
 - tools/onnx/test_cli_prepare.sh tests the public registry pull-to-prepare lifecycle with a synthetic ONNX fixture and fake downloader.
+- tools/quantization/test_quantization.py and test_onnx_integration.py test packing, FP16, dynamic INT8, ternary output, ONNX Runtime execution, and numerical comparison.
+- tools/quantization/test_cli_quantize.sh tests registry pull-to-quantize and derived sidecar/provenance output.
 - .github/workflows/ci.yml runs Bash syntax checks, ShellCheck, Python ONNX tests, and shell regression tests.
-- Test/runtime prerequisites: Bash, jq, check-jsonschema, Python 3.11+, NumPy, ONNX, curl or wget, and sha256sum or shasum.
+- Test/runtime prerequisites: Bash, jq, check-jsonschema, Python 3.11+, NumPy, ONNX, ONNX Runtime, onnxconverter-common (FP16), pytest, curl or wget, and sha256sum or shasum.
 
 ## Explicit non-goals (still hold)
 
