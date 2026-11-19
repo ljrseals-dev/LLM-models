@@ -40,6 +40,11 @@ jobs:
       - name: Test numeric quantized fallback transforms
         run: "$RUNNER_TEMP/venv/bin/python tools/onnx/test_fallback.py"
 
+      - name: Test independent numeric fallback oracles
+        run: |
+          "$RUNNER_TEMP/venv/bin/python" tools/onnx/test_fallback_runtime.py
+          "$RUNNER_TEMP/venv/bin/python" tools/onnx/test_fallback_runtime_malformed.py
+
       - name: Test ONNX-to-Cmajor patch generation and provenance
         run: "$RUNNER_TEMP/venv/bin/python tools/onnx/test_prepare.py"
 
