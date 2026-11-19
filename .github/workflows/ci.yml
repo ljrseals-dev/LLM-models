@@ -50,6 +50,9 @@ jobs:
       - name: Test ONNX-to-Cmajor patch generation and provenance
         run: "$RUNNER_TEMP/venv/bin/python tools/onnx/test_prepare.py"
 
+      - name: Test direct emitter nested-tensor safety
+        run: "$RUNNER_TEMP/venv/bin/python tools/onnx/test_emitter_safety.py"
+
       - name: Test Realm-Quant algorithms and ONNX Runtime execution
         run: |
           "$RUNNER_TEMP/venv/bin/python" -m pytest -q tools/quantization
