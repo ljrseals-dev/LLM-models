@@ -139,6 +139,18 @@ The current M1/M2 CLI stores one immutable manifest per model ID. Registering th
 
 A SHA-256 match establishes byte identity against the digest in the manifest. It does not establish who published the artifact, whether the publisher is authentic, whether redistribution is licensed, or whether the model is safe. Signature verification and trusted-key management are not implemented.
 
+## ONNX preparation semantics
+
+An artifact with format "onnx" can be selected by the prepare command. The CLI requires exactly one matching artifact unless --artifact ARTIFACT_ID is supplied, rechecks the artifact SHA-256, and requires a self-contained ONNX file (external tensor-data paths are refused).
+
+The current Cmajor preparation path supports only the explicit fallback contracts documented in tools/onnx/README.md:
+
+- FLOAT16 initializers are promoted to FLOAT32.
+- Signed INT8 initializers are folded only through initializer-backed DequantizeLinear nodes with explicit scale and optional zero-point.
+- Packed ternary UINT8 initializers are decoded only with the cmajor.ternary.<initializer-name> metadata contract.
+
+These conversions expand weights to FLOAT32 Cmajor constants. They do not preserve packed quantized storage, implement GGUF Q4/Q5 quantization, or prove Cmajor compilation / ONNX Runtime parity. Unsupported ONNX operators and known Cmajor template stubs are rejected. Each prepared patch contains provenance.json with the source artifact digest and hashes of generated files.
+
 ## Validation States
 
 | Status        | Meaning |
