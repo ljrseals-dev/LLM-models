@@ -403,7 +403,9 @@ cmd_prepare() {
   if [[ "$actual" != "$expected" ]]; then
     local qdest
     mkdir -p "$QUARANTINE_DIR"
-    qdest="$QUARANTINE_DIR/$selected_id.$actual.$(date +%s)"
+    local qname
+    qname=$(printf '%s' "$selected_id" | tr -c 'A-Za-z0-9._-' '_')
+    qdest="$QUARANTINE_DIR/$qname.$actual.$(date +%s)"
     cp -- "$candidate" "$qdest" || die "Could not quarantine mismatched ONNX artifact"
     write_artifact_validation "$manifest" "$index" "quarantined" "fail" "expected $expected; got $actual"
     die "ONNX artifact hash mismatch; quarantined copy: $qdest"
