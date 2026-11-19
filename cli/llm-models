@@ -310,7 +310,7 @@ cmd_pull() {
   fi
   part="$DOWNLOADS_DIR/$url_hash.part"
 
-  log "Downloading: $url"
+  log "Downloading artifact: $filename (URL SHA-256: $url_hash)"
   log "Partial file: $part"
   if command -v curl >/dev/null 2>&1; then
     curl --proto '=https' --proto-redir '=https' --fail --location \
@@ -344,7 +344,7 @@ cmd_pull() {
   ok "Artifact stored"
   printf '  SHA-256: %s\n' "$stored_hash"
   printf '  Path:    %s\n' "$(artifact_store_path "$stored_hash")"
-  audit_log "PULL url=$url sha256=$stored_hash verified=$([[ -n "$expected_hash" ]] && echo yes || echo no)"
+  audit_log "PULL filename=$filename url_sha256=$url_hash sha256=$stored_hash verified=$([[ -n "$expected_hash" ]] && echo yes || echo no)"
 }
 
 cmd_quantize() {
