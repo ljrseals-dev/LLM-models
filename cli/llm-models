@@ -347,7 +347,7 @@ cmd_pull() {
 }
 
 cmd_quantize() {
-  local id="\${1:-}" mode="" artifact_id="" output="" threshold_ratio="0.7" op_types="MatMul,Gemm"
+  local id="${1:-}" mode="" artifact_id="" output="" threshold_ratio="0.7" op_types="MatMul,Gemm"
   [[ -n "$id" ]] || die "Usage: $PROG quantize <id> --mode fp16|int8|ternary [--artifact ID] [--output DIR]"
   shift
   while [[ $# -gt 0 ]]; do
@@ -431,7 +431,7 @@ cmd_quantize() {
   local quantized_root safe_id stage_root stage_output final_output
   quantized_root="$REGISTRY_DIR/quantized"
   mkdir -p "$quantized_root"
-  safe_id="\${id//\//__}"
+  safe_id="${id//\//__}"
   if [[ -z "$output" ]]; then
     final_output="$quantized_root/$safe_id/$mode"
   else
