@@ -879,6 +879,7 @@ def main(argv):
         onnx.checker.check_model(onnxModel)
         prepare_quantized_model(onnxModel)
         inferredModel = shape_inference.infer_shapes(onnxModel)
+        validate_cmajor_operator_contracts(inferredModel)
         onnx.checker.check_model(inferredModel)
         generateNodesAndConnections(inferredModel)
         printCmajor(patchDir)
