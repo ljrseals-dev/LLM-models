@@ -109,6 +109,33 @@ class QuantizedEmitterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "FLOAT16 graph I/O"):
             EMITTER.prepare_quantized_model(model)
 
+    def test_template_stubs_are_rejected_before_codegen(self):
+        for op_type, inputs, outputs in (
+            ("LSTM", ["x"], ["y"]),
+            ("Slice", ["x", "starts", "ends"], ["y"]),
+            ("Gather", ["x", "indices"], ["y"]),
+            ("Concat", ["x", "y"], ["z"]),
+        ):
+            with self.subTest(op_type=op_type):
+                node = helper.make_node(op_type, inputs, outputs, name="stub")
+                model_input = tensor_value_info("x", TensorProto.FLOAT, [1])
+                model_output = tensor_value_info(outputs[0], TensorProto.FLOAT, [1])
+                graph = helper.make_graph([node], "stub-op", [model_input], [model_output])
+                model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+                with self.assertRaisesRegex(ValueError, "unsupported ONNX operator"):
+                    EMITTER.prepare_quantized_model(model)
+
+    def test_transpose_uses_onnx_default_reverse_permutation(self):
+        model_input = tensor_value_info("x", TensorProto.FLOAT, [2, 3])
+        model_output = tensor_value_info("y", TensorProto.FLOAT, [3, 2])
+        node = helper.make_node("Transpose", ["x"], ["y"], name="transpose")
+        graph = helper.make_graph([node], "transpose-default", [model_input], [model_output])
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+        EMITTER.prepare_quantized_model(model)
+        EMITTER.generateNodesAndConnections(model)
+        params = EMITTER.getOperatorParameters(node)
+        self.assertIn("int[2] (1, 0)", params)
+
 
 if __name__ == "__main__":
     unittest.main()
