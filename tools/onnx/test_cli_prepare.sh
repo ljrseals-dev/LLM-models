@@ -2,7 +2,7 @@
 # End-to-end test for the public CLI prepare command; all inputs are synthetic.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "\${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CLI="$ROOT/cli/llm-models"
 TMP="$(mktemp -d)"
 REGISTRY="$TMP/registry"
@@ -28,7 +28,7 @@ while [[ $# -gt 0 ]]; do
     *) shift ;;
   esac
 done
-[[ -n "$out" && -n "\${TEST_DOWNLOAD_SOURCE:-}" ]]
+[[ -n "$out" && -n "${TEST_DOWNLOAD_SOURCE:-}" ]]
 cp -- "$TEST_DOWNLOAD_SOURCE" "$out"
 CURL
 chmod +x "$FAKE_BIN/curl"
