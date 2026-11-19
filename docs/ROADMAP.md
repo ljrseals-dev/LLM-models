@@ -1,6 +1,6 @@
 # Implementation Roadmap Status
 
-Tracking progress against the vision in docs/VISION.md. Status reflects code in the repository, not planned behavior.
+Tracking progress against docs/VISION.md. Status reflects code in the repository, not planned behavior.
 
 ## M1 — Registry foundation
 
@@ -30,24 +30,35 @@ Tracking progress against the vision in docs/VISION.md. Status reflects code in 
 | Multi-connection downloads | Not implemented |
 | Trusted signing-key policy | Not implemented |
 
-A download without --sha256 is stored by its computed digest but remains **unverified** until a manifest declares the expected digest and verify succeeds. A checksum proves byte identity against the supplied digest; it does not establish publisher authenticity or model safety.
+A download without --sha256 is stored by its computed digest but remains unverified until a manifest declares the expected digest and verification succeeds. A checksum proves byte identity against the supplied digest; it does not establish publisher authenticity or model safety.
 
 ## M3 — Local model preparation
 
 | Item | Status |
 |------|--------|
-| GGUF / ONNX inspection | Not implemented |
-| Hardware compatibility checks | Partial (basic host summary only) |
-| Quantization adapters | Not implemented |
-| Derived-artifact provenance records | Specification only |
+| ONNX artifact selection from manifest | Implemented; requires exactly one match or --artifact |
+| Verify source artifact before preparation | Implemented; digest rechecked immediately before conversion |
+| FLOAT16 initializer fallback | Implemented; promotes to FLOAT32 |
+| Signed INT8 DequantizeLinear fallback | Implemented; initializer-backed scalar/per-axis parameters only |
+| Packed ternary fallback | Implemented; requires explicit cmajor.ternary metadata contract |
+| ONNX operator allowlist | Implemented; unsupported operators fail closed |
+| Cmajor patch generation | Implemented; templates bundled with upstream notices |
+| Derived-artifact provenance | Implemented; source and generated-file SHA-256 recorded |
+| External ONNX tensor-data references | Refused; self-contained ONNX artifact required |
+| GGUF quantization (Q4/Q5/Q8 etc.) | Not implemented |
+| Compression-preserving quantized Cmajor runtime | Not implemented; current fallbacks expand weights to FLOAT32 |
+| Hardware compatibility / memory estimate | Not implemented beyond basic host summary |
+| Cmajor compilation | Not yet verified in CI |
+| ONNX Runtime vs Cmajor numerical parity | Not implemented |
 
-The prepare command exits nonzero and makes no changes until M3 is implemented.
+The prepare command converts a verified ONNX artifact into a Cmajor patch under registry/prepared/ (or an explicit new output path). The supported fallback transformations are those already developed in ljrseals-dev/schema. They are conversion fallbacks: generated Cmajor constants are FLOAT32, not packed INT8 or ternary weights. See tools/onnx/README.md for contracts, refusal cases, dependencies, and licensing.
 
 ## M4 — Local deployment
 
 | Item | Status |
 |------|--------|
 | llama.cpp integration | Not implemented |
+| ONNX Runtime adapter | Not implemented |
 | Runtime lifecycle / health | Not implemented |
 | Loopback-only default | Documented design requirement |
 | Rollback | Not implemented |
@@ -58,9 +69,9 @@ The deploy and rollback commands exit nonzero and do not start or change service
 
 | Item | Status |
 |------|--------|
-| ONNX Runtime adapter | Not started |
 | Backend capability detection | Not started |
 | Stable adapter contract | Specification only |
+| Runtime interoperability tests | Not started |
 
 ## M6 — StackAlign integration
 
@@ -72,9 +83,12 @@ The deploy and rollback commands exit nonzero and do not start or change service
 
 ## Validation and CI
 
-- scripts/smoke-test.sh runs isolated regression tests in a temporary registry.
-- .github/workflows/ci.yml runs Bash syntax checks, ShellCheck, and the regression suite.
-- Test/runtime prerequisites: Bash, jq, check-jsonschema, curl or wget, and sha256sum or shasum.
+- scripts/smoke-test.sh runs isolated registry regression tests in a temporary registry.
+- tools/onnx/test_fallback.py tests numeric FLOAT16, INT8, and ternary fallback transforms.
+- tools/onnx/test_prepare.py tests verified ONNX-to-Cmajor generation, provenance hashes, and no-overwrite behavior.
+- tools/onnx/test_cli_prepare.sh tests the public registry pull-to-prepare lifecycle with a synthetic ONNX fixture and fake downloader.
+- .github/workflows/ci.yml runs Bash syntax checks, ShellCheck, Python ONNX tests, and shell regression tests.
+- Test/runtime prerequisites: Bash, jq, check-jsonschema, Python 3.11+, NumPy, ONNX, curl or wget, and sha256sum or shasum.
 
 ## Explicit non-goals (still hold)
 
