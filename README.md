@@ -120,7 +120,7 @@ llm-models status
 llm-models rollback
 ```
 
-These commands describe the intended user experience. They are not yet fully implemented.
+These commands describe the intended user experience. The current prepare command supports the narrower ONNX-to-Cmajor fallback path documented below; GGUF re-quantization such as Q4_K_M is not yet implemented.
 
 ### Artifact Lifecycle
 
@@ -156,12 +156,14 @@ A failed validation stops deployment. A failed health check must not silently re
 | Manifest schema validation           | Implemented; fails closed       |
 | Isolated regression tests + CI        | Implemented                     |
 | Audit log                            | Basic append-only local log     |
-| Quantization / preparation (M3)      | Scaffold only                   |
+| ONNX-to-Cmajor quantized fallback preparation (M3) | Implemented for explicit FLOAT16, signed INT8 DQ, and metadata-declared ternary cases; expands weights to FLOAT32 |
 | Runtime / deployment (M4)            | Scaffold only                   |
 | Multi-backend (M5)                   | Not started                     |
 | StackAlign integration (M6)          | Spec only (`docs/INTEGRATION.md`)|
 
-The `prepare`, `deploy`, and `rollback` commands deliberately return a nonzero status until their milestones are implemented. They do not pretend to perform work.
+The `prepare` command now converts a verified, self-contained ONNX artifact into a Cmajor patch using the quantized fallback work integrated from `ljrseals-dev/schema`. It records source and output hashes in `provenance.json`, refuses unsupported operators and external ONNX tensor-data paths, and never overwrites an existing output. The supported fallbacks promote FLOAT16, fold explicit signed INT8 `DequantizeLinear` weights, and decode metadata-declared packed ternary weights. **These fallbacks expand weights to FLOAT32 constants; they are not a compression-preserving runtime or a GGUF Q4/Q5 quantizer.** Generated Cmajor compilation and ONNX Runtime parity are not yet verified.
+
+The `deploy` and `rollback` commands remain deliberately unimplemented and return a nonzero status without changing services.
 
 Legacy installer scripts (Scholar AI, Termux llama.cpp) live under `contrib/` as historical examples only; they are not part of the supported registry CLI.
 
@@ -169,12 +171,16 @@ Legacy installer scripts (Scholar AI, Termux llama.cpp) live under `contrib/` as
 
 ```bash
 # From the repository root
-# Required local tools: bash, jq, check-jsonschema, curl or wget,
+# Registry tools: bash, jq, check-jsonschema, curl or wget,
 # and sha256sum or shasum.
+# Optional ONNX preparation tools:
+python3 -m pip install -r tools/onnx/requirements.txt
 bash cli/llm-models status
 bash cli/llm-models register examples/phi-3.5-mini.example.manifest.json
 bash cli/llm-models list
 bash cli/llm-models inspect example/phi-3.5-mini
+# For a manifest containing a verified ONNX artifact:
+bash cli/llm-models prepare publisher/model --artifact onnx-artifact-id
 bash scripts/smoke-test.sh
 ```
 
@@ -184,6 +190,7 @@ See also:
 - [`docs/MANIFEST.md`](docs/MANIFEST.md) — model manifest specification  
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — milestone tracking  
 - [`docs/INTEGRATION.md`](docs/INTEGRATION.md) — StackAlign contract notes  
+- [`tools/onnx/README.md`](tools/onnx/README.md) — ONNX quantized fallback preparation, CLI use, tests, and licensing  
 - [`schemas/model-manifest.schema.json`](schemas/model-manifest.schema.json)  
 
 ---
