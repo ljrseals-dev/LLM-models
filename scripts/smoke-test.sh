@@ -94,7 +94,7 @@ jq -n '{manifest_version:"1.0",id:"tests/invalid",version:"1",publisher:"x"}' > 
 expect_fail "schema-invalid manifest is rejected" bash "$CLI" register "$TMP/invalid.json"
 
 # Path traversal IDs and filenames must be rejected before any write/download.
-jq --arg hash "$HASH" '.id="../escape"' "$TMP/valid.manifest.json" > "$TMP/traversal-id.json"
+jq --arg hash "$HASH" '.id="tests/../escape"' "$TMP/valid.manifest.json" > "$TMP/traversal-id.json"
 expect_fail "traversal model id is rejected" bash "$CLI" register "$TMP/traversal-id.json"
 expect_fail "unsafe download filename is rejected" bash "$CLI" pull https://example.invalid/model.gguf --filename ../escape.gguf
 expect_fail "malformed expected digest is rejected" bash "$CLI" pull https://example.invalid/model.gguf --sha256 nope
@@ -118,6 +118,6 @@ for tool in dirname mkdir; do
   command -v "$tool" >/dev/null 2>&1 && ln -s "$(command -v "$tool")" "$TMP/no-jq/$tool"
 done
 expect_fail "verification fails closed without jq" env PATH="$TMP/no-jq" \
-  LLM_MODELS_REGISTRY="$REGISTRY" /bin/bash bash "$CLI" verify tests/fixture-model
+  LLM_MODELS_REGISTRY="$REGISTRY" /bin/bash "$CLI" verify tests/fixture-model
 
 printf '\nAll LLM-models regression tests passed.\n'
