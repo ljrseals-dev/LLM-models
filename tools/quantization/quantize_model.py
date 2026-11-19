@@ -87,6 +87,14 @@ def run(args) -> dict:
     source_model = onnx.load(str(source), load_external_data=False)
     reject_external_data(source_model)
     onnx.checker.check_model(source_model)
+    selected_ops = tuple(item.strip() for item in args.op_types.split(",") if item.strip())
+    if args.mode == "int8" and not selected_ops:
+        raise ValueError("INT8 mode requires at least one --op-types value")
+    source_ops = {node.op_type for node in source_model.graph.node}
+    if args.mode == "int8" and not source_ops.intersection(selected_ops):
+        raise ValueError(
+            "none of the selected --op-types occur in this ONNX graph; refusing a no-op quantization"
+        )
 
     destination = output_dir / "model.onnx"
     output_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -104,6 +112,14 @@ def run(args) -> dict:
         candidate = onnx.load(str(destination), load_external_data=False)
         reject_external_data(candidate)
         onnx.checker.check_model(candidate)
+        quantized_node_types = {
+            node.op_type for node in candidate.graph.node
+            if node.op_type in {"MatMulInteger", "DynamicQuantizeLinear", "ConvInteger", "QLinearMatMul", "QLinearConv"}
+        }
+        if args.mode == "int8" and not quantized_node_types:
+            raise RuntimeError(
+                "ONNX Runtime produced no dynamic INT8 operators; the selected weights may not be eligible"
+            )
 
         output_files = [destination]
         if args.mode == "ternary":
@@ -189,6 +205,8 @@ def run(args) -> dict:
             "source_format": "onnx",
             "source_sha256": source_hash,
             "quantization_method": method,
+            "source_operator_types": sorted(source_ops),
+            "quantized_operator_types": sorted(quantized_node_types),
             "parameters": parameters,
             "quantizer": "ljrseals-dev/realm-quant",
             "quantizer_source_revision": "05b0db3f28c948e729b9b9586f417cac6537220b",
