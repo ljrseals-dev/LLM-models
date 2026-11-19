@@ -237,7 +237,9 @@ def getOperatorParameters (op: onnx.NodeProto):
         perm = getNodeAttributeValue (op, "perm")
         if perm is None:
             rank = getConnectionDataTypeDimensions (op.input[0])
-            reversed_axes = ", ".join(str(i) for i in reversed(range(rank)))            perm = "int[" + str(rank) + "] (" + reversed_axes + ")"        totalElements = getConnectionDataTypeTotalElements (op.input[0])
+            reversed_axes = ", ".join(str(i) for i in reversed(range(rank)))
+            perm = "int[" + str(rank) + "] (" + reversed_axes + ")"
+        totalElements = getConnectionDataTypeTotalElements (op.input[0])
         return " (" + inputDataType + ", " + outputDataType + ", " + str (totalElements) + ", " + perm + ")"
 
     if op.op_type == "MatMul":
