@@ -99,6 +99,8 @@ validate_manifest() {
     die "Manifest is not a valid JSON object: $file"
   check-jsonschema --schemafile "$SCHEMA_FILE" "$file" ||
     die "Manifest does not conform to the repository JSON Schema: $file"
+  jq -e '[.artifacts[].id] as $ids | ($ids | length) == ($ids | unique | length)' "$file" >/dev/null ||
+    die "Manifest contains duplicate artifact IDs"
   local id
   id=$(jq -er '.id | strings | select(length > 0)' "$file") ||
     die "Manifest has no valid model id"
@@ -140,13 +142,12 @@ store_artifact() {
     expected_hash="$(printf '%s' "$expected_hash" | tr '[:upper:]' '[:lower:]')"
   fi
 
-  local actual
+  local actual dest dest_dir tmp
   actual=$(sha256_file "$src")
   if [[ -n "$expected_hash" && "$actual" != "$expected_hash" ]]; then
     die "Hash mismatch for $src (expected $expected_hash, got $actual)"
   fi
 
-  local dest dest_dir tmp
   dest=$(artifact_store_path "$actual")
   dest_dir="$(dirname "$dest")"
   mkdir -p "$dest_dir"
@@ -162,12 +163,13 @@ store_artifact() {
       die "Could not copy artifact into the registry store"
     fi
     chmod 0444 "$tmp" 2>/dev/null || true
-    if ! mv -n -- "$tmp" "$dest"; then
+    if ! ln -- "$tmp" "$dest"; then
       rm -f -- "$tmp"
-      die "Could not publish artifact into the registry store"
+      [[ -f "$dest" && "$(sha256_file "$dest")" == "$actual" ]] ||
+        die "Could not publish artifact into the registry store"
+    else
+      rm -f -- "$tmp"
     fi
-    [[ -f "$dest" && "$(sha256_file "$dest")" == "$actual" ]] ||
-      die "Artifact store publication failed integrity verification"
   fi
 
   printf '%s\n' "$actual"
