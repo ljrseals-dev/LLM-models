@@ -869,9 +869,12 @@ def main(argv):
         if not os.path.isfile(model):
             raise ValueError(f"ONNX model file not found or not regular: {model}")
         onnxModel = onnx.load(model, load_external_data=False)
+        graph_tensors = list(onnxModel.graph.initializer)
+        for sparse in onnxModel.graph.sparse_initializer:
+            graph_tensors.extend((sparse.values, sparse.indices))
         external = [
             tensor.name or "<unnamed>"
-            for tensor in onnxModel.graph.initializer
+            for tensor in graph_tensors
             if tensor.data_location == onnx.TensorProto.EXTERNAL or tensor.external_data
         ]
         if external:
