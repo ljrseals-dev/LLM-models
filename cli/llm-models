@@ -31,6 +31,8 @@ Artifacts:
   verify <id>                   Verify every artifact declared by a manifest
 
 Preparation and deployment:
+  quantize <id> --mode fp16|int8|ternary [options]
+                                Create a derived quantized ONNX artifact set
   prepare <id> [--artifact ID] [--output DIR]
                                 Convert a verified ONNX artifact to a Cmajor patch
   deploy <id>                   Not implemented (M4)
@@ -53,7 +55,8 @@ Security:
   - Hashes are verified when --sha256 is supplied.
   - Downloads without an expected hash remain unverified.
   - Manifest validation fails closed if jq or check-jsonschema is missing.
-  - prepare requires a verified, self-contained ONNX artifact and Python ONNX dependencies.
+  - quantize and prepare require verified, self-contained ONNX artifacts and Python dependencies.
+  - quantize supports FP16, dynamic INT8, and packed ternary sidecars.
   - Quantized fallback conversion expands supported weights to FLOAT32 Cmajor constants.
   - Generated patches are not Cmajor-compiled or ONNX Runtime parity-tested by this command.
   - Deployment remains unimplemented.
@@ -93,6 +96,7 @@ cmd_status() {
   printf '  REGISTERED               yes\n'
   printf '  DOWNLOADED               yes (HTTPS; resumable partial files)\n'
   printf '  VERIFIED                 yes (SHA-256; fail-closed)\n'
+  printf '  QUANTIZED                FP16 / dynamic INT8 / ternary (requires Python dependencies)\n'
   printf '  PREPARED                 ONNX to Cmajor patch (requires Python dependencies)\n'
   printf '  DEPLOYED                 not implemented\n'
 }
@@ -342,6 +346,126 @@ cmd_pull() {
   audit_log "PULL url=$url sha256=$stored_hash verified=$([[ -n "$expected_hash" ]] && echo yes || echo no)"
 }
 
+cmd_quantize() {
+  local id="\${1:-}" mode="" artifact_id="" output="" threshold_ratio="0.7" op_types="MatMul,Gemm"
+  [[ -n "$id" ]] || die "Usage: $PROG quantize <id> --mode fp16|int8|ternary [--artifact ID] [--output DIR]"
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --mode)
+        [[ $# -ge 2 && -n "$2" ]] || die "--mode requires fp16, int8, or ternary"
+        mode="$2"; shift 2 ;;
+      --artifact)
+        [[ $# -ge 2 && -n "$2" ]] || die "--artifact requires an artifact ID"
+        artifact_id="$2"; shift 2 ;;
+      --output)
+        [[ $# -ge 2 && -n "$2" ]] || die "--output requires a directory"
+        output="$2"; shift 2 ;;
+      --threshold-ratio)
+        [[ $# -ge 2 && -n "$2" ]] || die "--threshold-ratio requires a number"
+        threshold_ratio="$2"; shift 2 ;;
+      --op-types)
+        [[ $# -ge 2 && -n "$2" ]] || die "--op-types requires a comma-separated list"
+        op_types="$2"; shift 2 ;;
+      --*)
+        die "Unknown quantize option: $1" ;;
+      *)
+        die "Unexpected quantize argument: $1" ;;
+    esac
+  done
+  [[ "$mode" == "fp16" || "$mode" == "int8" || "$mode" == "ternary" ]] ||
+    die "quantize requires --mode fp16, int8, or ternary"
+
+  validate_model_id "$id"
+  ensure_registry
+  require_json_tools
+  require_command python3
+  local manifest
+  manifest=$(manifest_path "$id")
+  [[ -f "$manifest" ]] || die "No manifest for model id: $id"
+  validate_manifest "$manifest"
+
+  local index
+  if ! index=$(jq -er --arg aid "$artifact_id" --arg use_aid "$([[ -n "$artifact_id" ]] && echo yes || echo no)" '
+    [.artifacts | to_entries[]
+      | select(((.value.format // "") | ascii_downcase) == "onnx"
+          or ((.value.filename // "") | ascii_downcase | endswith(".onnx")))
+      | select($use_aid == "no" or .value.id == $aid)]
+    | if length == 1 then .[0].key
+      elif length == 0 then error("no matching ONNX artifact found")
+      else error("multiple ONNX artifacts found; specify --artifact ARTIFACT_ID")
+      end
+  ' "$manifest" 2>/dev/null); then
+    die "Could not select exactly one ONNX artifact; specify --artifact if the manifest contains multiple ONNX files"
+  fi
+
+  local selected_id filename expected candidate actual
+  selected_id=$(jq -er ".artifacts[$index].id" "$manifest")
+  filename=$(jq -er ".artifacts[$index].filename" "$manifest")
+  expected=$(jq -er ".artifacts[$index].sha256" "$manifest")
+  validate_filename "$filename"
+  validate_sha256 "$expected"
+  expected=$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')
+  candidate=$(artifact_store_path "$expected")
+  if [[ ! -f "$candidate" ]]; then
+    if [[ -f "$ROOT/$filename" ]]; then
+      candidate="$ROOT/$filename"
+    else
+      die "ONNX artifact is not present locally; pull it first: $selected_id"
+    fi
+  fi
+  actual=$(sha256_file "$candidate")
+  if [[ "$actual" != "$expected" ]]; then
+    local qname qdest
+    qname=$(printf '%s' "$selected_id" | tr -c 'A-Za-z0-9._-' '_')
+    mkdir -p "$QUARANTINE_DIR"
+    qdest="$QUARANTINE_DIR/$qname.$actual.$(date +%s)"
+    cp -- "$candidate" "$qdest" || die "Could not quarantine mismatched ONNX artifact"
+    write_artifact_validation "$manifest" "$index" "quarantined" "fail" "expected $expected; got $actual"
+    die "ONNX artifact hash mismatch; quarantined copy: $qdest"
+  fi
+  store_artifact "$candidate" "$expected" >/dev/null
+  candidate=$(artifact_store_path "$expected")
+  write_artifact_validation "$manifest" "$index" "verified" "pass" "SHA-256 matched before quantization"
+
+  local quantized_root safe_id stage_root stage_output final_output
+  quantized_root="$REGISTRY_DIR/quantized"
+  mkdir -p "$quantized_root"
+  safe_id="\${id//\//__}"
+  if [[ -z "$output" ]]; then
+    final_output="$quantized_root/$safe_id/$mode"
+  else
+    final_output="$output"
+    mkdir -p "$(dirname "$final_output")"
+  fi
+  [[ ! -e "$final_output" && ! -L "$final_output" ]] ||
+    die "Output already exists; refusing to overwrite: $final_output"
+
+  stage_root=$(mktemp -d "$quantized_root/.quantize.XXXXXX")
+  stage_output="$stage_root/output"
+  log "Quantizing verified ONNX artifact $selected_id using $mode ..."
+  if ! python3 "$ROOT/tools/quantization/quantize_model.py" \
+      --model "$candidate" --output-dir "$stage_output" \
+      --model-id "$id" --artifact-id "$selected_id" --sha256 "$expected" \
+      --mode "$mode" --threshold-ratio "$threshold_ratio" --op-types "$op_types"; then
+    rm -rf -- "$stage_root"
+    die "Quantization failed; no final output was published"
+  fi
+  if ! mv -n -- "$stage_output" "$final_output"; then
+    rm -rf -- "$stage_root"
+    die "Could not publish quantized artifacts to $final_output"
+  fi
+  if [[ -e "$stage_output" ]]; then
+    rm -rf -- "$stage_root"
+    die "Output path appeared concurrently; staged quantization output was removed"
+  fi
+  rmdir "$stage_root" 2>/dev/null || true
+  ok "Quantized artifacts created for $id ($mode)"
+  printf '  Output: %s\n' "$final_output"
+  printf '  Manifest fragment: %s/derived-manifest.fragment.json\n' "$final_output"
+  audit_log "QUANTIZE id=$id artifact=$selected_id mode=$mode source_sha256=$expected output=$final_output"
+}
+
 cmd_prepare() {
   local id="${1:-}" artifact_id="" output=""
   [[ -n "$id" ]] || die "Usage: $PROG prepare <id> [--artifact ARTIFACT_ID] [--output DIR]"
@@ -477,6 +601,7 @@ main() {
     register) cmd_register "$@" ;;
     verify) cmd_verify "$@" ;;
     pull) cmd_pull "$@" ;;
+    quantize) cmd_quantize "$@" ;;
     prepare) cmd_prepare "$@" ;;
     deploy) cmd_deploy "$@" ;;
     rollback) cmd_rollback "$@" ;;
