@@ -407,15 +407,9 @@ def printCmajor (patchDir):
         print (cmaj)
     else:
 
-        if not os.path.exists (patchDir):
-            shutil.copytree (patchTemplateDir, patchDir)
-        else:
-            with open (patchTemplateDir + "/onnx.cmajor", "r") as f:
-                f2 = open (patchDir + "/onnx.cmajor", "w")
-                f2.write (f.read())
-            with open (patchTemplateDir + "/model.cmajorpatch", "r") as f:
-                f2 = open (patchDir + "/model.cmajorpatch", "w")
-                f2.write (f.read())
+        if os.path.exists (patchDir):
+            raise FileExistsError ("refusing to overwrite existing Cmajor patch directory: " + patchDir)
+        shutil.copytree (patchTemplateDir, patchDir)
 
         f = open (patchDir + "/model.cmajor", "w")
         f.write (cmaj)
