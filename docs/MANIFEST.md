@@ -23,6 +23,7 @@ A model is never considered verified solely because a file was downloaded.
 - Schema: `schemas/model-manifest.schema.json`
 - Encoding: UTF-8
 - Recommended filename: `model.manifest.json` (or `<model-id>.manifest.json`)
+- Registration validates against the JSON Schema using `check-jsonschema` and requires `jq`; validation fails closed when either tool or the schema is unavailable.
 
 ---
 
@@ -131,6 +132,12 @@ Each entry describes one concrete file (original weights, a specific quantizatio
 4. Changing any trust-relevant field (hashes, signatures, license, source) requires a new version or a new artifact entry.
 
 ---
+
+## Registry Implementation Boundaries
+
+The current M1/M2 CLI stores one immutable manifest per model ID. Registering the same ID again is rejected rather than silently replacing its manifest. Multiple concurrently registered versions for one model ID are planned work and are not yet supported. Artifact IDs must be unique within a manifest. Artifact filenames are basenames only; path separators are rejected.
+
+A SHA-256 match establishes byte identity against the digest in the manifest. It does not establish who published the artifact, whether the publisher is authentic, whether redistribution is licensed, or whether the model is safe. Signature verification and trusted-key management are not implemented.
 
 ## Validation States
 
