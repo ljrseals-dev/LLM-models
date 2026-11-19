@@ -105,6 +105,15 @@ PATH="$FAKE_BIN:$PATH" bash "$CLI" pull https://example.invalid/model.gguf --sha
 bash "$CLI" verify tests/fixture-model >/dev/null
 pass "HTTPS pull, hash verification, content-addressed storage, and manifest status"
 
+# Signed URLs and embedded credentials must never be copied into logs.
+PATH="$FAKE_BIN:$PATH" bash "$CLI" pull \
+  'https://user:password@example.invalid/model.gguf?token=secret-token' \
+  --sha256 "$HASH" --filename fixture-redacted.gguf >/dev/null
+if grep -E 'user:password|secret-token' "$REGISTRY/logs/operations.log"; then
+  fail "download credentials or query tokens were written to the audit log"
+fi
+pass "download logs redact embedded credentials and signed query strings"
+
 # A mismatched expected digest must fail and quarantine the downloaded bytes.
 expect_fail "download hash mismatch is rejected" env PATH="$FAKE_BIN:$PATH" TEST_DOWNLOAD_SOURCE="$TMP/payload.gguf" \
   bash "$CLI" pull https://example.invalid/bad.gguf --sha256 "0000000000000000000000000000000000000000000000000000000000000000" --filename bad.gguf
