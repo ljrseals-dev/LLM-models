@@ -237,8 +237,7 @@ def getOperatorParameters (op: onnx.NodeProto):
         perm = getNodeAttributeValue (op, "perm")
         if perm is None:
             rank = getConnectionDataTypeDimensions (op.input[0])
-            reversed_axes = ", ".join(str(i) for i in reversed(range(rank)))
-            perm = "int[" + str(rank) + "] (" + reversed_axes + ")"
+            reversed_axes = ", ".join(str(i) for i in reversed(range(rank)))            perm = "int[" + str(rank) + "] (" + reversed_axes + ")"
         totalElements = getConnectionDataTypeTotalElements (op.input[0])
         return " (" + inputDataType + ", " + outputDataType + ", " + str (totalElements) + ", " + perm + ")"
 
@@ -477,8 +476,7 @@ def _decode_ternary_initializers(model):
                  if key.startswith(prefix)}
     initializer_by_name = {item.name: item for item in model.graph.initializer}
     for name, raw_contract in annotated.items():
-        if name not in initializer_by_name:
-            raise ValueError(f"ternary metadata references missing initializer: {name}")
+        if name not in initializer_by_name:            raise ValueError(f"ternary metadata references missing initializer: {name}")
         tensor = initializer_by_name[name]
         if tensor.data_type != onnx.TensorProto.UINT8:
             raise ValueError(f"{name}: ternary packed initializer must be UINT8")
@@ -529,6 +527,12 @@ def _dequantize_int8_initializers(model):
     for node in dq_nodes:
         if len(node.input) < 2 or len(node.input) > 3 or len(node.output) != 1:
             raise ValueError(f"{node.name or 'DequantizeLinear'}: unsupported input/output arity")
+        attributes = {item.name: onnx.helper.get_attribute_value(item) for item in node.attribute}
+        if "block_size" in attributes:
+            raise ValueError(f"{node.name or 'DequantizeLinear'}: blocked INT8 quantization is not supported by this fallback")
+        if ("output_dtype" in attributes
+                and attributes["output_dtype"] != onnx.TensorProto.FLOAT):
+            raise ValueError(f"{node.name or 'DequantizeLinear'}: only FLOAT32 DequantizeLinear output is supported")
         data_name, scale_name = node.input[0], node.input[1]
         zero_name = node.input[2] if len(node.input) == 3 and node.input[2] else None
         if data_name not in initializer_by_name:
@@ -717,8 +721,7 @@ def validate_cmajor_operator_contracts(model):
         if node.op_type != "Conv":
             continue
 
-        if len(node.input) > 2 and node.input[2]:
-            raise ValueError(
+        if len(node.input) > 2 and node.input[2]:            raise ValueError(
                 f"{node.name or 'Conv'}: bundled Cmajor Conv does not implement the optional bias input"
             )
 
