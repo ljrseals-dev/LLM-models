@@ -179,7 +179,7 @@ def main() -> int:
         parser.error("--sha256 must contain exactly 64 hexadecimal characters")
     try:
         provenance = prepare(args)
-    except (OSError, ValueError, RuntimeError, onnx.checker.ValidationError) as exc:
+    except Exception as exc:
         print(f"Preparation refused: {exc}", file=sys.stderr)
         return 2
     print(f"Prepared Cmajor patch: {args.output}")
