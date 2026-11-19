@@ -205,7 +205,8 @@ def ternary_quantize_model(
         scale_axis = output_axes.get(tensor.name, 0)
         symbols, scales, reconstructed = _ternarize(array, threshold_ratio, scale_axis)
         packed = pack_2bit(symbols)
-        key = f"tensor_{index}"        packed_arrays[f"{key}_symbols"] = packed
+        key = f"tensor_{index}"
+        packed_arrays[f"{key}_symbols"] = packed
         packed_arrays[f"{key}_scales"] = scales.astype(np.float32)
         tensor.CopyFrom(numpy_helper.from_array(reconstructed.astype(array.dtype), tensor.name))
 
