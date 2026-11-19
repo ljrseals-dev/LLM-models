@@ -15,6 +15,7 @@ import re
 import shutil
 import sys
 
+import numpy
 import onnx
 from onnx import TensorProto, shape_inference
 
@@ -160,6 +161,15 @@ def prepare(args) -> dict:
             "source_sha256": source_hash,
             "converter": "LLM-models ONNX-to-Cmajor preparation",
             "emitter": "Cmajor onnxToCmajor.py with schema_review fallback_runtime",
+            "source_revisions": {
+                "ljrseals-dev/schema": "fce779ea30a098794e298e39ae3fd8c96e80bd85",
+                "cmajor-lang/cmajor": "4e9568a2dacfff633fabf6726d6c6affc3a19069",
+            },
+            "tool_versions": {
+                "python": sys.version.split()[0],
+                "numpy": numpy.__version__,
+                "onnx": onnx.__version__,
+            },
             "created_at": datetime.now(timezone.utc).isoformat(),
             "input_tensor_counts": input_counts,
             "transformations": transformations,
