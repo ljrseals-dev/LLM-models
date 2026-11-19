@@ -62,7 +62,7 @@ bash tools/onnx/test_cli_prepare.sh
 
 The tests cover numeric fallback transforms, INT8 per-axis dequantization, packed ternary decoding, malformed/unsupported cases, hash refusal, patch generation, provenance hashes, and the registry CLI lifecycle.
 
-The historical Cmajor template contains explicit compile-time stubs for LSTM, Slice, Gather, and Concat; the emitter now rejects these operators before code generation rather than emitting a patch that cannot compile. The converter also supports only the narrow operator subset represented by the bundled template.
+The historical Cmajor template contains explicit compile-time stubs for LSTM, Slice, Gather, and Concat; the emitter rejects these operators. GRU is also withheld because its current template semantics are not validated, and Pad is withheld because the template does not initialize padded elements. Conv is restricted to static-spatial, rank-4 height-1 FLOAT32 input/weights/output with stride 1, zero padding, group 1, no bias, and valid output geometry. Gemm rejects non-default alpha/beta and transposition flags. Transpose is restricted to FLOAT32. These checks prevent known-invalid or semantically unsupported graphs from being emitted.
 
 The tests do **not** prove that generated Cmajor compiles, that all model operators are supported, or that Cmajor execution matches ONNX Runtime. A Cmajor compiler/runtime and ONNX Runtime parity suite remain separate acceptance gates. Unsupported operators and unimplemented template stubs are rejected rather than approximated.
 
