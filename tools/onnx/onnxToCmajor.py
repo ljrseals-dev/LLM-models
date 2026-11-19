@@ -237,8 +237,7 @@ def getOperatorParameters (op: onnx.NodeProto):
         perm = getNodeAttributeValue (op, "perm")
         if perm is None:
             rank = getConnectionDataTypeDimensions (op.input[0])
-            reversed_axes = ", ".join(str(i) for i in reversed(range(rank)))            perm = "int[" + str(rank) + "] (" + reversed_axes + ")"
-        totalElements = getConnectionDataTypeTotalElements (op.input[0])
+            reversed_axes = ", ".join(str(i) for i in reversed(range(rank)))            perm = "int[" + str(rank) + "] (" + reversed_axes + ")"        totalElements = getConnectionDataTypeTotalElements (op.input[0])
         return " (" + inputDataType + ", " + outputDataType + ", " + str (totalElements) + ", " + perm + ")"
 
     if op.op_type == "MatMul":
@@ -382,12 +381,18 @@ def populateIO (model: onnx.ModelProto):
     connections.append ("")
 
 def populateMissingNodeNames (model: onnx.ModelProto):
-    nextNode = 1
+    # ONNX node names are optional. Generate deterministic names without
+    # colliding with names already supplied by the model author.
+    used_names = {node.name for node in model.graph.node if node.name}
+    next_node = 1
 
     for node in model.graph.node:
         if node.name == "":
-            node.name = "node_" + str (nextNode)
-            nextNode = nextNode + 1
+            while "node_" + str(next_node) in used_names:
+                next_node += 1
+            node.name = "node_" + str(next_node)
+            used_names.add(node.name)
+            next_node += 1
 
 def generateNodesAndConnections (model: onnx.ModelProto):
     populateMissingNodeNames (model)
@@ -477,8 +482,7 @@ def _decode_ternary_initializers(model):
     initializer_by_name = {item.name: item for item in model.graph.initializer}
     for name, raw_contract in annotated.items():
         if name not in initializer_by_name:            raise ValueError(f"ternary metadata references missing initializer: {name}")
-        tensor = initializer_by_name[name]
-        if tensor.data_type != onnx.TensorProto.UINT8:
+        tensor = initializer_by_name[name]        if tensor.data_type != onnx.TensorProto.UINT8:
             raise ValueError(f"{name}: ternary packed initializer must be UINT8")
         try:
             contract = json.loads(raw_contract)
@@ -717,7 +721,6 @@ def validate_cmajor_operator_contracts(model):
                 raise ValueError(
                     f"{node.name or 'Gemm'}: bundled Cmajor Gemm supports only alpha=beta=1 and transA=transB=0"
                 )
-
         if node.op_type != "Conv":
             continue
 
