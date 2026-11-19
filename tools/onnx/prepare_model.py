@@ -36,6 +36,9 @@ def sha256_file(path: Path) -> str:
 def _walk_graph_tensors(graph):
     for tensor in graph.initializer:
         yield tensor
+    for sparse in graph.sparse_initializer:
+        yield sparse.values
+        yield sparse.indices
     for node in graph.node:
         for attribute in node.attribute:
             if attribute.type == onnx.AttributeProto.TENSOR:
