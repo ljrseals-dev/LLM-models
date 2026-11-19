@@ -120,7 +120,7 @@ llm-models status
 llm-models rollback
 ```
 
-These commands describe the intended user experience. The current prepare command supports the narrower ONNX-to-Cmajor fallback path documented below; GGUF re-quantization such as Q4_K_M is not yet implemented.
+These commands describe the intended user experience. The current quantize command supports FP16, dynamic INT8, and packed 2-bit ternary sidecars for ONNX. The separate prepare command converts supported ONNX graphs to Cmajor; GGUF Q4_K_M quantization remains future work.
 
 ### Artifact Lifecycle
 
@@ -156,12 +156,15 @@ A failed validation stops deployment. A failed health check must not silently re
 | Manifest schema validation           | Implemented; fails closed       |
 | Isolated regression tests + CI        | Implemented                     |
 | Audit log                            | Basic append-only local log     |
-| ONNX-to-Cmajor quantized fallback preparation (M3) | Implemented for explicit FLOAT16, signed INT8 DQ, and metadata-declared ternary cases; expands weights to FLOAT32 |
+| ONNX quantization (M3) | Implemented: FP16, dynamic INT8, packed 2-bit ternary sidecars; ternary ONNX model reconstructs float weights |
+| ONNX-to-Cmajor preparation (M3) | Implemented for explicit FLOAT16, signed INT8 DQ, and metadata-declared ternary cases; expands weights to FLOAT32 |
 | Runtime / deployment (M4)            | Scaffold only                   |
 | Multi-backend (M5)                   | Not started                     |
 | StackAlign integration (M6)          | Spec only (`docs/INTEGRATION.md`)|
 
-The `prepare` command now converts a verified, self-contained ONNX artifact into a Cmajor patch using the quantized fallback work integrated from `ljrseals-dev/schema`. It records source and output hashes in `provenance.json`, refuses unsupported operators and external ONNX tensor-data paths, and never overwrites an existing output. The supported fallbacks promote FLOAT16, fold explicit signed INT8 `DequantizeLinear` weights, and decode metadata-declared packed ternary weights. **These fallbacks expand weights to FLOAT32 constants; they are not a compression-preserving runtime or a GGUF Q4/Q5 quantizer.** Generated Cmajor compilation and ONNX Runtime parity are not yet verified.
+The `quantize` command uses the merged Python workbench from `ljrseals-dev/realm-quant` to produce FP16, dynamic INT8, or packed 2-bit ternary weight artifacts. Ternary mode emits a compact NPZ sidecar with per-output-channel scales and an ONNX model with reconstructed floating-point weights for standard ONNX Runtime compatibility. Each run writes source/output hashes, tool versions, quantization parameters, and a derived-manifest fragment; it does not mutate the registered source manifest.
+
+The `prepare` command converts a verified, self-contained ONNX artifact into a Cmajor patch using the quantized fallback work integrated from `ljrseals-dev/schema`. It records source and output hashes in `provenance.json`, refuses unsupported operators and external ONNX tensor-data paths, and never overwrites an existing output. The supported fallbacks promote FLOAT16, fold explicit signed INT8 `DequantizeLinear` weights, and decode metadata-declared packed ternary weights. **These Cmajor fallbacks expand supported weights to FLOAT32 constants; they are not a compression-preserving runtime.** The separate Realm-Quant ternary sidecar is not yet consumed by the Cmajor emitter, and dynamic INT8 operators may be outside its operator allowlist. Generated Cmajor compilation and ONNX Runtime parity are not yet verified.
 
 The `deploy` and `rollback` commands remain deliberately unimplemented and return a nonzero status without changing services.
 
@@ -175,11 +178,13 @@ Legacy installer scripts (Scholar AI, Termux llama.cpp) live under `contrib/` as
 # and sha256sum or shasum.
 # Optional ONNX preparation tools:
 python3 -m pip install -r tools/onnx/requirements.txt
+python3 -m pip install -r tools/quantization/requirements.txt
 bash cli/llm-models status
 bash cli/llm-models register examples/phi-3.5-mini.example.manifest.json
 bash cli/llm-models list
 bash cli/llm-models inspect example/phi-3.5-mini
 # For a manifest containing a verified ONNX artifact:
+bash cli/llm-models quantize publisher/model --mode int8 --artifact onnx-artifact-id
 bash cli/llm-models prepare publisher/model --artifact onnx-artifact-id
 bash scripts/smoke-test.sh
 ```
@@ -190,7 +195,8 @@ See also:
 - [`docs/MANIFEST.md`](docs/MANIFEST.md) — model manifest specification  
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) — milestone tracking  
 - [`docs/INTEGRATION.md`](docs/INTEGRATION.md) — StackAlign contract notes  
-- [`tools/onnx/README.md`](tools/onnx/README.md) — ONNX quantized fallback preparation, CLI use, tests, and licensing  
+- [`tools/onnx/README.md`](tools/onnx/README.md) — ONNX-to-Cmajor fallback preparation, CLI use, tests, and licensing  
+- [`tools/quantization/README.md`](tools/quantization/README.md) — FP16, dynamic INT8, ternary quantization, and provenance
 - [`schemas/model-manifest.schema.json`](schemas/model-manifest.schema.json)  
 
 ---
