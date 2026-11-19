@@ -43,5 +43,8 @@ jobs:
       - name: Test ONNX-to-Cmajor patch generation and provenance
         run: "$RUNNER_TEMP/venv/bin/python tools/onnx/test_prepare.py"
 
+      - name: Test CLI ONNX preparation lifecycle
+        run: bash tools/onnx/test_cli_prepare.sh
+
       - name: Run isolated registry regression tests
         run: bash scripts/smoke-test.sh
