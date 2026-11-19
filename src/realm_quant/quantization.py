@@ -16,9 +16,12 @@ import numpy as np
 
 def pack_2bit(codes: np.ndarray) -> np.ndarray:
     """Pack codes 0..3, four values per byte, least-significant pair first."""
-    values = np.asarray(codes, dtype=np.uint8).reshape(-1)
-    if np.any(values > 3):
+    raw = np.asarray(codes)
+    if raw.dtype.kind not in "iu" or raw.dtype.kind == "b":
+        raise ValueError("2-bit symbols must be integers in [0, 3]")
+    if np.any(raw < 0) or np.any(raw > 3):
         raise ValueError("2-bit symbols must be in [0, 3]")
+    values = raw.astype(np.uint8, copy=False).reshape(-1)
     padded = np.pad(values, (0, (-values.size) % 4))
     groups = padded.reshape(-1, 4)
     return (
@@ -31,15 +34,61 @@ def pack_2bit(codes: np.ndarray) -> np.ndarray:
 
 def unpack_2bit(packed: np.ndarray, count: int) -> np.ndarray:
     """Unpack the first count symbols from a 2-bit byte stream."""
-    if count < 0 or count > np.asarray(packed).size * 4:
+    if isinstance(count, (bool, np.bool_)) or not isinstance(count, (int, np.integer)):
+        raise ValueError("count must be a non-negative integer")
+    raw = np.asarray(packed)
+    if raw.dtype.kind not in "iu" or raw.dtype.kind == "b":
+        raise ValueError("packed data must contain integer bytes")
+    if np.any(raw < 0) or np.any(raw > 255):
+        raise ValueError("packed data must contain bytes in [0, 255]")
+    if count < 0 or count > raw.size * 4:
         raise ValueError("count exceeds packed symbol capacity")
-    data = np.asarray(packed, dtype=np.uint8).reshape(-1)
+    data = raw.astype(np.uint8, copy=False).reshape(-1)
     out = np.empty(data.size * 4, dtype=np.uint8)
     out[0::4] = data & 0x03
     out[1::4] = (data >> 2) & 0x03
     out[2::4] = (data >> 4) & 0x03
     out[3::4] = (data >> 6) & 0x03
     return out[:count]
+
+
+def _walk_graph_tensors(graph):
+    """Yield initializers and tensor attributes, including nested subgraphs."""
+    import onnx
+
+    yield from graph.initializer
+    for sparse in graph.sparse_initializer:
+        yield sparse.values
+        yield sparse.indices
+    for node in graph.node:
+        for attribute in node.attribute:
+            if attribute.type == onnx.AttributeProto.TENSOR:
+                yield attribute.t
+            elif attribute.type == onnx.AttributeProto.TENSORS:
+                yield from attribute.tensors
+            elif attribute.type == onnx.AttributeProto.GRAPH:
+                yield from _walk_graph_tensors(attribute.g)
+            elif attribute.type == onnx.AttributeProto.GRAPHS:
+                for nested_graph in attribute.graphs:
+                    yield from _walk_graph_tensors(nested_graph)
+
+
+def _load_self_contained_onnx(source: Path):
+    """Load ONNX without following external paths embedded in the model."""
+    import onnx
+
+    model = onnx.load(str(source), load_external_data=False)
+    external = [
+        tensor.name or "<unnamed>"
+        for tensor in _walk_graph_tensors(model.graph)
+        if tensor.data_location == onnx.TensorProto.EXTERNAL or tensor.external_data
+    ]
+    if external:
+        raise ValueError(
+            "external ONNX tensor-data references are not supported: " + ", ".join(external)
+        )
+    onnx.checker.check_model(model)
+    return model
 
 
 def _ternarize(
@@ -119,7 +168,16 @@ def ternary_quantize_model(
 
     source = Path(model_path)
     destination = Path(output_path)
-    model = onnx.load(str(source), load_external_data=True)
+    if not source.is_file():
+        raise ValueError(f"source ONNX model is not a regular file: {source}")
+    if source.resolve() == destination.resolve():
+        raise ValueError("source and destination ONNX paths must be different")
+    sidecar = destination.with_suffix(".ternary.npz")
+    manifest_path = destination.with_suffix(".ternary.json")
+    for candidate in (destination, sidecar, manifest_path):
+        if candidate.exists() or candidate.is_symlink():
+            raise FileExistsError(f"refusing to overwrite existing quantization output: {candidate}")
+    model = _load_self_contained_onnx(source)
     packed_arrays: dict[str, np.ndarray] = {}
     manifest: dict[str, Any] = {
         "format": "realm-quant-ternary-v1",
@@ -147,8 +205,7 @@ def ternary_quantize_model(
         scale_axis = output_axes.get(tensor.name, 0)
         symbols, scales, reconstructed = _ternarize(array, threshold_ratio, scale_axis)
         packed = pack_2bit(symbols)
-        key = f"tensor_{index}"
-        packed_arrays[f"{key}_symbols"] = packed
+        key = f"tensor_{index}"        packed_arrays[f"{key}_symbols"] = packed
         packed_arrays[f"{key}_scales"] = scales.astype(np.float32)
         tensor.CopyFrom(numpy_helper.from_array(reconstructed.astype(array.dtype), tensor.name))
 
@@ -177,7 +234,6 @@ def ternary_quantize_model(
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     onnx.save_model(model, str(destination))
-    sidecar = destination.with_suffix(".ternary.npz")
     np.savez_compressed(sidecar, **packed_arrays)
     manifest["summary"] = {
         "tensor_count": len(manifest["tensors"]),
@@ -188,7 +244,6 @@ def ternary_quantize_model(
         "packed_ratio": packed_bytes / original_bytes if original_bytes else None,
         "note": "Ratio excludes ONNX graph, biases, metadata, and NPZ container overhead.",
     }
-    manifest_path = destination.with_suffix(".ternary.json")
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return {
         "model": str(destination),
@@ -208,6 +263,15 @@ def quantize_model(
     """Quantize an ONNX model as fp16, dynamic int8, or packed ternary weights."""
     source = Path(model_path)
     destination = Path(output_path)
+    if mode not in {"fp16", "int8", "ternary"}:
+        raise ValueError(f"unsupported quantization mode: {mode}")
+    if not source.is_file():
+        raise ValueError(f"source ONNX model is not a regular file: {source}")
+    if source.resolve() == destination.resolve():
+        raise ValueError("source and destination ONNX paths must be different")
+    if destination.exists() or destination.is_symlink():
+        raise FileExistsError(f"refusing to overwrite existing quantization output: {destination}")
+    _load_self_contained_onnx(source)
     destination.parent.mkdir(parents=True, exist_ok=True)
 
     if mode == "ternary":
@@ -223,7 +287,7 @@ def quantize_model(
             ) from exc
         import onnx
 
-        model = onnx.load(str(source), load_external_data=True)
+        model = _load_self_contained_onnx(source)
         converted = float16.convert_float_to_float16(model, keep_io_types=True)
         onnx.save_model(converted, str(destination))
         return {"model": str(destination), "mode": "fp16", "note": "I/O tensor types preserved."}
@@ -233,6 +297,8 @@ def quantize_model(
             from onnxruntime.quantization import QuantType, quantize_dynamic
         except ImportError as exc:
             raise RuntimeError("INT8 conversion requires onnxruntime.") from exc
+        # Validate recursively before ONNX Runtime gets a chance to follow external_data paths.
+        _load_self_contained_onnx(source)
         quantize_dynamic(
             model_input=str(source),
             model_output=str(destination),
