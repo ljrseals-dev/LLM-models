@@ -20,7 +20,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y jq shellcheck
-          python3 -m pip install --user check-jsonschema
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install check-jsonschema
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
 
       - name: Check shell syntax
         run: |
@@ -28,6 +30,4 @@ jobs:
           shellcheck cli/llm-models lib/common.sh scripts/smoke-test.sh
 
       - name: Run isolated regression tests
-        env:
-          PATH: /home/runner/.local/bin:$PATH
         run: bash scripts/smoke-test.sh
