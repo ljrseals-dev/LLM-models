@@ -23,7 +23,8 @@
     "id": {
       "type": "string",
       "description": "Stable model identifier (e.g. publisher/name).",
-      "minLength": 1
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"
     },
     "name": {
       "type": "string",
@@ -104,7 +105,12 @@
             "type": "string",
             "enum": ["gguf", "onnx", "safetensors", "pytorch", "other"]
           },
-          "filename": { "type": "string", "minLength": 1 },
+          "filename": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*$",
+            "description": "A basename only; path separators are not permitted."
+          },
           "size_bytes": { "type": "integer", "minimum": 0 },
           "sha256": {
             "type": "string",
