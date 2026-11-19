@@ -442,7 +442,7 @@ cmd_quantize() {
   [[ ! -e "$final_output" && ! -L "$final_output" ]] ||
     die "Output already exists; refusing to overwrite: $final_output"
 
-  stage_root=$(mktemp -d "$quantized_root/.quantize.XXXXXX")
+  stage_root=$(mktemp -d "$(dirname "$final_output")/.quantize.XXXXXX")
   stage_output="$stage_root/output"
   log "Quantizing verified ONNX artifact $selected_id using $mode ..."
   if ! python3 "$ROOT/tools/quantization/quantize_model.py" \
@@ -553,7 +553,7 @@ cmd_prepare() {
   [[ ! -e "$final_output" && ! -L "$final_output" ]] ||
     die "Output already exists; refusing to overwrite: $final_output"
 
-  stage_root=$(mktemp -d "$prepared_root/.prepare.XXXXXX")
+  stage_root=$(mktemp -d "$(dirname "$final_output")/.prepare.XXXXXX")
   stage_patch="$stage_root/patch"
   log "Preparing verified ONNX artifact $selected_id ..."
   if ! python3 "$ROOT/tools/onnx/prepare_model.py" \
