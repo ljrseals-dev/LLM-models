@@ -115,6 +115,8 @@ class QuantizedEmitterTests(unittest.TestCase):
             ("Slice", ["x", "starts", "ends"], ["y"]),
             ("Gather", ["x", "indices"], ["y"]),
             ("Concat", ["x", "y"], ["z"]),
+            ("Pad", ["x", "pads"], ["y"]),
+            ("GRU", ["x", "w", "r"], ["y", "yh"]),
         ):
             with self.subTest(op_type=op_type):
                 node = helper.make_node(op_type, inputs, outputs, name="stub")
@@ -124,6 +126,58 @@ class QuantizedEmitterTests(unittest.TestCase):
                 model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
                 with self.assertRaisesRegex(ValueError, "unsupported ONNX operator"):
                     EMITTER.prepare_quantized_model(model)
+
+    def test_cmajor_conv_infers_kernel_shape_only_for_supported_1d_geometry(self):
+        x = tensor_value_info("x", TensorProto.FLOAT, [1, 1, 1, 8])
+        y = tensor_value_info("y", TensorProto.FLOAT, [1, 1, 1, 6])
+        weights = numpy_helper.from_array(
+            np.ones((1, 1, 1, 3), dtype=np.float32), name="weights",
+        )
+        node = helper.make_node("Conv", ["x", "weights"], ["y"], name="conv")
+        graph = helper.make_graph([node], "conv-valid", [x], [y], [weights])
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+        inferred = onnx.shape_inference.infer_shapes(model)
+        EMITTER.validate_cmajor_operator_contracts(inferred)
+        attrs = {item.name: onnx.helper.get_attribute_value(item) for item in inferred.graph.node[0].attribute}
+        self.assertEqual(list(attrs["kernel_shape"]), [1, 3])
+
+    def test_cmajor_conv_rejects_padding_and_bias(self):
+        x = tensor_value_info("x", TensorProto.FLOAT, [1, 1, 1, 8])
+        y = tensor_value_info("y", TensorProto.FLOAT, [1, 1, 1, 8])
+        weights = numpy_helper.from_array(
+            np.ones((1, 1, 1, 3), dtype=np.float32), name="weights",
+        )
+        padded = helper.make_node(
+            "Conv", ["x", "weights"], ["y"], name="padded-conv",
+            kernel_shape=[1, 3], pads=[0, 1, 0, 1],
+        )
+        graph = helper.make_graph([padded], "conv-padded", [x], [y], [weights])
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+        inferred = onnx.shape_inference.infer_shapes(model)
+        with self.assertRaisesRegex(ValueError, "zero padding"):
+            EMITTER.validate_cmajor_operator_contracts(inferred)
+
+        bias = numpy_helper.from_array(np.array([0.0], dtype=np.float32), name="bias")
+        with_bias = helper.make_node(
+            "Conv", ["x", "weights", "bias"], ["y"], name="biased-conv",
+            kernel_shape=[1, 3],
+        )
+        graph = helper.make_graph([with_bias], "conv-bias", [x], [y], [weights, bias])
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+        inferred = onnx.shape_inference.infer_shapes(model)
+        with self.assertRaisesRegex(ValueError, "does not implement the optional bias"):
+            EMITTER.validate_cmajor_operator_contracts(inferred)
+
+    def test_cmajor_gemm_rejects_transposed_weights(self):
+        a = tensor_value_info("a", TensorProto.FLOAT, [1, 2])
+        c_out = tensor_value_info("c", TensorProto.FLOAT, [1, 3])
+        b = numpy_helper.from_array(np.ones((3, 2), dtype=np.float32), name="b")
+        node = helper.make_node("Gemm", ["a", "b"], ["c"], name="gemm", transB=1)
+        graph = helper.make_graph([node], "gemm-transpose", [a], [c_out], [b])
+        model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+        inferred = onnx.shape_inference.infer_shapes(model)
+        with self.assertRaisesRegex(ValueError, "transA=transB=0"):
+            EMITTER.validate_cmajor_operator_contracts(inferred)
 
     def test_transpose_uses_onnx_default_reverse_permutation(self):
         model_input = tensor_value_info("x", TensorProto.FLOAT, [2, 3])
