@@ -7,7 +7,7 @@ set -euo pipefail
 VERSION="0.2.1-m2"
 PROG="llm-models"
 
-SCRIPT_DIR="$(cd "$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck source=../lib/common.sh
 source "$ROOT/lib/common.sh"
@@ -73,7 +73,7 @@ cmd_status() {
   if command -v free >/dev/null 2>&1; then
     local mem
     mem=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}') || mem="unknown"
-    printf '  Memory:      %s MB\n' "\${mem:-unknown}"
+    printf '  Memory:      %s MB\n' "${mem:-unknown}"
   else
     printf '  Memory:      unknown\n'
   fi
@@ -114,7 +114,7 @@ cmd_list() {
 }
 
 cmd_inspect() {
-  local id="\${1:-}"
+  local id="${1:-}"
   [[ -n "$id" ]] || die "Usage: $PROG inspect <model-id>"
   validate_model_id "$id"
   ensure_registry
@@ -130,7 +130,7 @@ cmd_inspect() {
 }
 
 cmd_register() {
-  local manifest="\${1:-}"
+  local manifest="${1:-}"
   [[ -n "$manifest" ]] || die "Usage: $PROG register <manifest.json>"
   [[ -f "$manifest" && -r "$manifest" ]] || die "Manifest file not found or unreadable: $manifest"
 
@@ -190,7 +190,7 @@ write_artifact_validation() {
 }
 
 cmd_verify() {
-  local id="\${1:-}"
+  local id="${1:-}"
   [[ -n "$id" ]] || die "Usage: $PROG verify <model-id>"
   validate_model_id "$id"
   ensure_registry
@@ -283,9 +283,9 @@ cmd_pull() {
   ensure_registry
   if [[ -z "$filename" ]]; then
     local url_path
-    url_path="\${url%%\\?*}"
-    url_path="\${url_path%%\\#*}"
-    filename="\${url_path##*/}"
+    url_path="${url%%\?*}"
+    url_path="${url_path%%\#*}"
+    filename="${url_path##*/}"
   fi
   validate_filename "$filename"
 
@@ -337,7 +337,7 @@ cmd_pull() {
 }
 
 cmd_prepare() {
-  local id="\${1:-}"
+  local id="${1:-}"
   [[ -n "$id" ]] || die "Usage: $PROG prepare <id>"
   [[ $# -eq 1 ]] || die "prepare does not accept additional arguments until M3 is implemented"
   validate_model_id "$id"
@@ -345,7 +345,7 @@ cmd_prepare() {
 }
 
 cmd_deploy() {
-  local id="\${1:-}"
+  local id="${1:-}"
   [[ -n "$id" ]] || die "Usage: $PROG deploy <id>"
   [[ $# -eq 1 ]] || die "deploy does not accept additional arguments until M4 is implemented"
   validate_model_id "$id"
@@ -357,7 +357,7 @@ cmd_rollback() {
 }
 
 main() {
-  local cmd="\${1:-help}"
+  local cmd="${1:-help}"
   shift || true
   case "$cmd" in
     help|-h|--help) usage ;;
