@@ -1,0 +1,120 @@
+{
+  "source_manifest_version": "1.0",
+  "id": "ljrseals-dev/5-senses",
+  "name": "5-Senses / BODY OF SECRETS",
+  "project_type": "language-model-research-and-training-source",
+  "version": "0.1.0",
+  "publisher": "ljrseals-dev",
+  "license": {
+    "spdx": "MIT",
+    "source": "https://github.com/ljrseals-dev/5-Senses/blob/01bfe122e84d9b46ee3302f3a66c8be81467fd64/LICENSE",
+    "scope": "5-Senses repository code only; each corpus item and external dependency retains its own rights and terms"
+  },
+  "source": {
+    "repository": "https://github.com/ljrseals-dev/5-Senses",
+    "revision": "01bfe122e84d9b46ee3302f3a66c8be81467fd64",
+    "revision_type": "git-commit",
+    "default_branch": "main",
+    "retrieval": "manual-or-explicit-operator-action",
+    "network_required_for_runtime": false
+  },
+  "capabilities": {
+    "statistical_language_model": [
+      "word-level n-gram",
+      "character-level n-gram",
+      "Laplace smoothing",
+      "perplexity",
+      "generation"
+    ],
+    "neural_models": [
+      "one-hidden-layer MLP",
+      "Hopfield associative memory"
+    ],
+    "reasoning": [
+      "expert rules",
+      "explicit truth-status vocabulary",
+      "provider-agnostic LLM interface"
+    ],
+    "corpus": [
+      "local document archive",
+      "BM25 retrieval",
+      "source metadata"
+    ]
+  },
+  "corpus_sources": [
+    {
+      "path": "data/sample_corpus/hopfield_notes.txt",
+      "role": "training-and-reference",
+      "subject": "Hopfield networks",
+      "rights_review": "verify source and license before redistribution or model training"
+    },
+    {
+      "path": "data/sample_corpus/kohonen_notes.txt",
+      "role": "training-and-reference",
+      "subject": "Kohonen self-organizing maps",
+      "rights_review": "verify source and license before redistribution or model training"
+    },
+    {
+      "path": "data/sample_corpus/pdp_notes.txt",
+      "role": "training-and-reference",
+      "subject": "parallel distributed processing",
+      "rights_review": "verify source and license before redistribution or model training"
+    },
+    {
+      "path": "data/sample_corpus/encyclopedia/encyclopaedia-britannica-11th-vol4-part3.txt",
+      "role": "historical-reference-and-potential-training",
+      "subject": "Encyclopaedia Britannica, 11th edition, volume 4 part 3",
+      "rights_review": "README identifies Project Gutenberg public-domain text; preserve attribution and confirm jurisdictional status"
+    },
+    {
+      "path": "data/sample_corpus/hiv_origins.txt",
+      "role": "evaluation-and-reference",
+      "subject": "HIV/AIDS origins",
+      "rights_review": "recheck citations and scientific currency before training or evaluation"
+    },
+    {
+      "path": "data/sample_corpus/sarscov2_origins.txt",
+      "role": "evaluation-and-reference",
+      "subject": "SARS-CoV-2 origins",
+      "rights_review": "recheck citations and scientific currency before training or evaluation"
+    },
+    {
+      "path": "data/sample_corpus/west_nile_origins.txt",
+      "role": "evaluation-and-reference",
+      "subject": "West Nile virus origins",
+      "rights_review": "recheck citations and scientific currency before training or evaluation"
+    }
+  ],
+  "artifact_status": {
+    "pretrained_large_language_model_weights": "not_present",
+    "trained_checkpoint": "not_present",
+    "tokenizer_artifact": "not_present",
+    "quantized_model": "not_present",
+    "code_and_research_source": "present-in-upstream-repository"
+  },
+  "training_status": {
+    "corpus_inventory": "initially-catalogued",
+    "corpus_cleaning_and_deduplication": "not-verified",
+    "license_and_rights_review": "incomplete",
+    "train_validation_test_split": "not-defined",
+    "large_language_model_training": "not-claimed",
+    "benchmarks": "not-run-by-this-integration"
+  },
+  "integration": {
+    "owner": "LLM-models",
+    "consumers": [
+      "LLM-zip-pdf",
+      "other local inference and research projects"
+    ],
+    "purpose": "track source revision, language-model components, corpus provenance, rights review, and future model artifacts",
+    "automatic_download": false,
+    "automatic_training": false,
+    "automatic_execution": false
+  },
+  "notes": [
+    "This is a source-project and corpus descriptor, not a weights manifest.",
+    "The repository implements a statistical n-gram language model and small classical neural models; it does not currently provide a pretrained transformer LLM checkpoint.",
+    "Do not mark corpus material as training-ready until rights, provenance, quality, deduplication, and split checks are completed.",
+    "When checkpoints are produced, register each concrete checkpoint separately using the standard model artifact manifest and SHA-256 verification workflow."
+  ]
+}
